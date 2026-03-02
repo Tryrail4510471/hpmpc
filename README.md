@@ -157,6 +157,7 @@ Trio, ASTRA, Quad, ABY2, and Tetrad support a Preprocessing phase.
 The preprocessing phase can be enabled in `config.h` or by setting `PRE=1` when compiling.
 Setting `PRE=0` interleaves the preprocessing and online phase.
 New protocols can be added to `protocols/`and adding a protocol ID to `protocols/Protocols.h`.
+To evaluate 4PC workloads secure against recently discovered [attacks](https://encrypto.de/papers/BS26.pdf), switch to the `dev` branch and set `CV_FIX=1` for `PROTOCOL=12`. 
 
 ## Functions
 
