@@ -15,11 +15,41 @@
 
 #define RESULTTYPE DATATYPE
 
-namespace transformer_smoke
+namespace ppti_tinybert
 {
+#ifndef PPTI_SEQ_LEN
 constexpr int SEQ_LEN = 4;
+#else
+constexpr int SEQ_LEN = PPTI_SEQ_LEN;
+#endif
+
+#ifndef PPTI_HIDDEN
 constexpr int HIDDEN = 8;
+#else
+constexpr int HIDDEN = PPTI_HIDDEN;
+#endif
+
+#ifndef PPTI_NUM_HEADS
+constexpr int NUM_HEADS = 2;
+#else
+constexpr int NUM_HEADS = PPTI_NUM_HEADS;
+#endif
+
+#ifndef PPTI_NUM_LAYERS
+constexpr int NUM_LAYERS = 4;
+#else
+constexpr int NUM_LAYERS = PPTI_NUM_LAYERS;
+#endif
+
+#ifndef PPTI_FFN_HIDDEN
 constexpr int FFN_HIDDEN = 16;
+#else
+constexpr int FFN_HIDDEN = PPTI_FFN_HIDDEN;
+#endif
+
+static_assert(HIDDEN % NUM_HEADS == 0, "PPTI TinyBERT requires HIDDEN to be divisible by NUM_HEADS.");
+constexpr int HEAD_DIM = HIDDEN / NUM_HEADS;
+constexpr int LAYER_WEIGHT_STRIDE = 10000;
 
 inline UINT_TYPE fixed(float value, int frac_bits = FRACTIONAL)
 {
@@ -117,6 +147,22 @@ void transpose(const std::vector<A>& in, std::vector<A>& out, int rows, int cols
     for (int r = 0; r < rows; r++)
         for (int c = 0; c < cols; c++)
             out[c * rows + r] = in[r * cols + c];
+}
+
+template <typename A>
+void extract_head(const std::vector<A>& in, std::vector<A>& out, int head)
+{
+    for (int r = 0; r < SEQ_LEN; r++)
+        for (int c = 0; c < HEAD_DIM; c++)
+            out[r * HEAD_DIM + c] = in[r * HIDDEN + head * HEAD_DIM + c];
+}
+
+template <typename A>
+void place_head(const std::vector<A>& in, std::vector<A>& out, int head)
+{
+    for (int r = 0; r < SEQ_LEN; r++)
+        for (int c = 0; c < HEAD_DIM; c++)
+            out[r * HIDDEN + head * HEAD_DIM + c] = in[r * HEAD_DIM + c];
 }
 
 template <typename A>
@@ -377,64 +423,93 @@ void secure_rowwise_softmax_poly(std::vector<A>& scores, int rows, int cols)
     for (auto& value : scores)
         value.complete_mult();
 }
-}  // namespace transformer_smoke
 
-template <typename Share>
-void transformer_inference(DATATYPE* res)
+template <typename A>
+void secure_multi_head_attention(std::vector<A>& x,
+                                 std::vector<A>& wq,
+                                 std::vector<A>& wk,
+                                 std::vector<A>& wv,
+                                 std::vector<A>& wo,
+                                 std::vector<A>& out)
 {
-    using A = Additive_Share<DATATYPE, Share>;
-    using namespace transformer_smoke;
-
-    std::vector<A> x(SEQ_LEN * HIDDEN);
-    std::vector<A> wq(HIDDEN * HIDDEN), wk(HIDDEN * HIDDEN), wv(HIDDEN * HIDDEN), wo(HIDDEN * HIDDEN);
-    std::vector<A> w1(HIDDEN * FFN_HIDDEN), w2(FFN_HIDDEN * HIDDEN);
-    std::vector<A> ln1_gamma(HIDDEN), ln1_beta(HIDDEN), ln2_gamma(HIDDEN), ln2_beta(HIDDEN);
-
-    print_online("Transformer smoke test: sharing inputs and model weights...");
-    load_inputs(x);
-    load_weights(wq, 0);
-    load_weights(wk, 1000);
-    load_weights(wv, 2000);
-    load_weights(wo, 3000);
-    load_weights(w1, 4000);
-    load_weights(w2, 5000);
-    load_layer_norm_params(ln1_gamma, ln1_beta, 6000);
-    load_layer_norm_params(ln2_gamma, ln2_beta, 7000);
-
-    print_online("Transformer smoke test: Q/K/V projections...");
     std::vector<A> q(SEQ_LEN * HIDDEN), k(SEQ_LEN * HIDDEN), v(SEQ_LEN * HIDDEN);
     secure_matmul(x, wq, q, SEQ_LEN, HIDDEN, HIDDEN);
     secure_matmul(x, wk, k, SEQ_LEN, HIDDEN, HIDDEN);
     secure_matmul(x, wv, v, SEQ_LEN, HIDDEN, HIDDEN);
 
-    print_online("Transformer smoke test: attention scores and context...");
-    std::vector<A> kt(HIDDEN * SEQ_LEN), scores(SEQ_LEN * SEQ_LEN), context(SEQ_LEN * HIDDEN);
-    transpose(k, kt, SEQ_LEN, HIDDEN);
-    secure_matmul(q, kt, scores, SEQ_LEN, HIDDEN, SEQ_LEN);
-    scale_public(scores, 1.0f / std::sqrt(static_cast<float>(HIDDEN)));
+    std::vector<A> concat_context(SEQ_LEN * HIDDEN, A(0));
+    for (int head = 0; head < NUM_HEADS; head++)
+    {
+        std::vector<A> qh(SEQ_LEN * HEAD_DIM), kh(SEQ_LEN * HEAD_DIM), vh(SEQ_LEN * HEAD_DIM);
+        std::vector<A> kh_t(HEAD_DIM * SEQ_LEN), scores(SEQ_LEN * SEQ_LEN), context(SEQ_LEN * HEAD_DIM);
 
-    // Stable Softmax slot: row max, polynomial exp approximation, and secret row-sum normalization.
-    secure_rowwise_softmax_poly(scores, SEQ_LEN, SEQ_LEN);
-    secure_matmul(scores, v, context, SEQ_LEN, SEQ_LEN, HIDDEN);
+        extract_head(q, qh, head);
+        extract_head(k, kh, head);
+        extract_head(v, vh, head);
 
-    print_online("Transformer smoke test: output projection and FFN...");
-    std::vector<A> attn_out(SEQ_LEN * HIDDEN), residual(SEQ_LEN * HIDDEN);
-    secure_matmul(context, wo, attn_out, SEQ_LEN, HIDDEN, HIDDEN);
-    for (int i = 0; i < static_cast<int>(residual.size()); i++)
-        residual[i] = x[i] + attn_out[i];
-    secure_rowwise_layer_norm(residual, ln1_gamma, ln1_beta, SEQ_LEN, HIDDEN);
+        transpose(kh, kh_t, SEQ_LEN, HEAD_DIM);
+        secure_matmul(qh, kh_t, scores, SEQ_LEN, HEAD_DIM, SEQ_LEN);
+        scale_public(scores, 1.0f / std::sqrt(static_cast<float>(HEAD_DIM)));
+        secure_rowwise_softmax_poly(scores, SEQ_LEN, SEQ_LEN);
+        secure_matmul(scores, vh, context, SEQ_LEN, SEQ_LEN, HEAD_DIM);
+        place_head(context, concat_context, head);
+    }
+
+    secure_matmul(concat_context, wo, out, SEQ_LEN, HIDDEN, HIDDEN);
+}
+
+template <typename A>
+void secure_tinybert_encoder_layer(std::vector<A>& hidden, int layer)
+{
+    const int base = layer * LAYER_WEIGHT_STRIDE;
+    std::vector<A> wq(HIDDEN * HIDDEN), wk(HIDDEN * HIDDEN), wv(HIDDEN * HIDDEN), wo(HIDDEN * HIDDEN);
+    std::vector<A> w1(HIDDEN * FFN_HIDDEN), w2(FFN_HIDDEN * HIDDEN);
+    std::vector<A> attn_gamma(HIDDEN), attn_beta(HIDDEN), ffn_gamma(HIDDEN), ffn_beta(HIDDEN);
+
+    load_weights(wq, base + 0);
+    load_weights(wk, base + 1000);
+    load_weights(wv, base + 2000);
+    load_weights(wo, base + 3000);
+    load_weights(w1, base + 4000);
+    load_weights(w2, base + 5000);
+    load_layer_norm_params(attn_gamma, attn_beta, base + 6000);
+    load_layer_norm_params(ffn_gamma, ffn_beta, base + 7000);
+
+    std::vector<A> attn_out(SEQ_LEN * HIDDEN), attn_residual(SEQ_LEN * HIDDEN);
+    secure_multi_head_attention(hidden, wq, wk, wv, wo, attn_out);
+    for (int i = 0; i < static_cast<int>(hidden.size()); i++)
+        attn_residual[i] = hidden[i] + attn_out[i];
+    secure_rowwise_layer_norm(attn_residual, attn_gamma, attn_beta, SEQ_LEN, HIDDEN);
 
     std::vector<A> ffn_hidden(SEQ_LEN * FFN_HIDDEN), ffn_out(SEQ_LEN * HIDDEN);
-    secure_matmul(residual, w1, ffn_hidden, SEQ_LEN, HIDDEN, FFN_HIDDEN);
+    secure_matmul(attn_residual, w1, ffn_hidden, SEQ_LEN, HIDDEN, FFN_HIDDEN);
     secure_gelu_poly(ffn_hidden);
     secure_matmul(ffn_hidden, w2, ffn_out, SEQ_LEN, FFN_HIDDEN, HIDDEN);
 
-    for (int i = 0; i < static_cast<int>(ffn_out.size()); i++)
-        ffn_out[i] += residual[i];
-    secure_rowwise_layer_norm(ffn_out, ln2_gamma, ln2_beta, SEQ_LEN, HIDDEN);
+    for (int i = 0; i < static_cast<int>(hidden.size()); i++)
+        hidden[i] = attn_residual[i] + ffn_out[i];
+    secure_rowwise_layer_norm(hidden, ffn_gamma, ffn_beta, SEQ_LEN, HIDDEN);
+}
+}  // namespace ppti_tinybert
 
-    ffn_out[0].prepare_reveal_to_all();
+template <typename Share>
+void transformer_inference(DATATYPE* res)
+{
+    using A = Additive_Share<DATATYPE, Share>;
+    using namespace ppti_tinybert;
+
+    std::vector<A> hidden(SEQ_LEN * HIDDEN);
+    print_online("PPTI TinyBERT: sharing input embeddings...");
+    load_inputs(hidden);
+
+    for (int layer = 0; layer < NUM_LAYERS; layer++)
+    {
+        print_online("PPTI TinyBERT: encoder layer...");
+        secure_tinybert_encoder_layer(hidden, layer);
+    }
+
+    hidden[0].prepare_reveal_to_all();
     A::communicate();
-    res[0] = ffn_out[0].complete_reveal_to_all();
-    print_online("Transformer smoke test completed.");
+    res[0] = hidden[0].complete_reveal_to_all();
+    print_online("PPTI TinyBERT smoke test completed.");
 }

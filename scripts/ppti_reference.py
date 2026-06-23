@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Plaintext reference for the PPTI tiny Transformer smoke test.
+"""Plaintext reference for the PPTI TinyBERT smoke test.
 
-This mirrors programs/transformer.hpp numerically, using the same dimensions,
-dummy inputs, dummy weights, polynomial Softmax, polynomial GELU, and LayerNorm
-steps. It is intentionally dependency-free so it can run on a fresh Ubuntu host.
+This mirrors programs/transformer.hpp numerically, using the same smoke-test
+dimensions, dummy inputs, dummy weights, polynomial Softmax, polynomial GELU,
+and LayerNorm steps. The default topology is TinyBERT-like: 4 encoder layers
+with multi-head self-attention.
 """
 
 from __future__ import annotations
@@ -15,7 +16,11 @@ from typing import Iterable, List
 
 SEQ_LEN = 4
 HIDDEN = 8
+NUM_HEADS = 2
+NUM_LAYERS = 4
 FFN_HIDDEN = 16
+HEAD_DIM = HIDDEN // NUM_HEADS
+LAYER_WEIGHT_STRIDE = 10000
 
 
 Matrix = List[List[float]]
@@ -65,6 +70,22 @@ def scale(a: Matrix, factor: float) -> Matrix:
     return [[x * factor for x in row] for row in a]
 
 
+def extract_head(values: Matrix, head: int) -> Matrix:
+    start = head * HEAD_DIM
+    end = start + HEAD_DIM
+    return [row[start:end] for row in values]
+
+
+def concat_heads(heads: list[Matrix]) -> Matrix:
+    out: Matrix = []
+    for r in range(SEQ_LEN):
+        row: list[float] = []
+        for head in heads:
+            row.extend(head[r])
+        out.append(row)
+    return out
+
+
 def softmax_poly(scores: Matrix) -> Matrix:
     out: Matrix = []
     for row in scores:
@@ -91,28 +112,53 @@ def layer_norm(values: Matrix, gamma: list[float], beta: list[float], epsilon: f
     return out
 
 
-def forward() -> tuple[Matrix, dict[str, Matrix]]:
-    x = load_inputs()
-    wq = load_weights(HIDDEN, HIDDEN, 0)
-    wk = load_weights(HIDDEN, HIDDEN, 1000)
-    wv = load_weights(HIDDEN, HIDDEN, 2000)
-    wo = load_weights(HIDDEN, HIDDEN, 3000)
-    w1 = load_weights(HIDDEN, FFN_HIDDEN, 4000)
-    w2 = load_weights(FFN_HIDDEN, HIDDEN, 5000)
-    ln1_gamma, ln1_beta = load_layer_norm_params(6000)
-    ln2_gamma, ln2_beta = load_layer_norm_params(7000)
+def multi_head_attention(x: Matrix, base: int, traces: dict[str, Matrix], layer: int) -> Matrix:
+    wq = load_weights(HIDDEN, HIDDEN, base + 0)
+    wk = load_weights(HIDDEN, HIDDEN, base + 1000)
+    wv = load_weights(HIDDEN, HIDDEN, base + 2000)
+    wo = load_weights(HIDDEN, HIDDEN, base + 3000)
 
     q = matmul(x, wq)
     k = matmul(x, wk)
     v = matmul(x, wv)
-    scores = scale(matmul(q, transpose(k)), 1.0 / math.sqrt(HIDDEN))
-    probs = softmax_poly(scores)
-    context = matmul(probs, v)
-    attn_out = matmul(context, wo)
-    residual = layer_norm(add(x, attn_out), ln1_gamma, ln1_beta)
-    ffn_hidden = gelu_poly(matmul(residual, w1))
-    ffn_out = layer_norm(add(matmul(ffn_hidden, w2), residual), ln2_gamma, ln2_beta)
-    return ffn_out, {"scores": scores, "probs": probs, "residual": residual}
+
+    contexts: list[Matrix] = []
+    for head in range(NUM_HEADS):
+        qh = extract_head(q, head)
+        kh = extract_head(k, head)
+        vh = extract_head(v, head)
+        scores = scale(matmul(qh, transpose(kh)), 1.0 / math.sqrt(HEAD_DIM))
+        probs = softmax_poly(scores)
+        contexts.append(matmul(probs, vh))
+        if layer == 0 and head == 0:
+            traces["layer0_head0_scores"] = scores
+            traces["layer0_head0_probs"] = probs
+
+    return matmul(concat_heads(contexts), wo)
+
+
+def encoder_layer(hidden: Matrix, layer: int, traces: dict[str, Matrix]) -> Matrix:
+    base = layer * LAYER_WEIGHT_STRIDE
+    w1 = load_weights(HIDDEN, FFN_HIDDEN, base + 4000)
+    w2 = load_weights(FFN_HIDDEN, HIDDEN, base + 5000)
+    attn_gamma, attn_beta = load_layer_norm_params(base + 6000)
+    ffn_gamma, ffn_beta = load_layer_norm_params(base + 7000)
+
+    attn_out = multi_head_attention(hidden, base, traces, layer)
+    attn_residual = layer_norm(add(hidden, attn_out), attn_gamma, attn_beta)
+    ffn_hidden = gelu_poly(matmul(attn_residual, w1))
+    ffn_out = matmul(ffn_hidden, w2)
+    out = layer_norm(add(attn_residual, ffn_out), ffn_gamma, ffn_beta)
+    traces[f"layer{layer}_out"] = out
+    return out
+
+
+def forward() -> tuple[Matrix, dict[str, Matrix]]:
+    hidden = load_inputs()
+    traces: dict[str, Matrix] = {"input": hidden}
+    for layer in range(NUM_LAYERS):
+        hidden = encoder_layer(hidden, layer, traces)
+    return hidden, traces
 
 
 def print_matrix(name: str, values: Matrix) -> None:
@@ -122,15 +168,16 @@ def print_matrix(name: str, values: Matrix) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the PPTI tiny Transformer plaintext reference.")
+    parser = argparse.ArgumentParser(description="Run the PPTI TinyBERT plaintext reference.")
     parser.add_argument("--dump", action="store_true", help="Print intermediate matrices.")
     args = parser.parse_args()
 
-    output, intermediates = forward()
+    output, traces = forward()
     print(f"ppti_reference_out0={output[0][0]:+.8f}")
     print(f"ppti_reference_shape={len(output)}x{len(output[0])}")
+    print(f"ppti_reference_topology=layers:{NUM_LAYERS} heads:{NUM_HEADS} hidden:{HIDDEN} seq:{SEQ_LEN}")
     if args.dump:
-        for name, values in intermediates.items():
+        for name, values in traces.items():
             print_matrix(name, values)
         print_matrix("output", output)
 
