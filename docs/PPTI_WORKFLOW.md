@@ -45,6 +45,36 @@ Plaintext reference:
 python3 scripts/ppti_reference.py --dump
 ```
 
+Synthetic model-file smoke test:
+
+```sh
+python3 scripts/ppti_export_tinybert.py --synthetic --output models/ppti/tinybert_ppti_synthetic.bin
+PPTI_MODEL_FILE=models/ppti/tinybert_ppti_synthetic.bin scripts/run.sh -p all -n 3
+```
+
+HuggingFace TinyBERT export, after installing `torch` and `transformers`:
+
+```sh
+python3 scripts/ppti_export_tinybert.py \
+  --model huawei-noah/TinyBERT_General_4L_312D \
+  --output models/ppti/tinybert_4l_312d_ppti.bin
+```
+
+Verified real TinyBERT export:
+
+```text
+params=4568736
+topology=layers:4 heads:12 hidden:312 ffn_hidden:1200
+layout=ppti_tinybert_v1
+```
+
+Real model-file header check:
+
+```text
+params=4568736
+expected=4568736
+```
+
 Real TinyBERT shape experiments can be selected at compile time after the
 weight-loader path is ready:
 

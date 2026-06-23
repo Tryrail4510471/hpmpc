@@ -24,6 +24,8 @@ measurements/logs/
 #executables
 executables/
 build/
+# generated PPTI model exports
+models/ppti/*.bin
 #for now
 CMake*
 #credentials

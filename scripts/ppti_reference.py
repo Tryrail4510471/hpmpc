@@ -47,6 +47,10 @@ def load_weights(rows: int, cols: int, offset: int) -> Matrix:
     return make_matrix(rows, cols, (weight_value(i + offset) for i in range(rows * cols)))
 
 
+def load_bias(cols: int, offset: int) -> list[float]:
+    return [weight_value(i + offset) for i in range(cols)]
+
+
 def load_layer_norm_params(offset: int) -> tuple[list[float], list[float]]:
     gamma = [1.0 + weight_value(offset + i) for i in range(HIDDEN)]
     beta = [weight_value(offset + 1000 + i) for i in range(HIDDEN)]
@@ -64,6 +68,10 @@ def transpose(a: Matrix) -> Matrix:
 
 def add(a: Matrix, b: Matrix) -> Matrix:
     return [[x + y for x, y in zip(ar, br)] for ar, br in zip(a, b)]
+
+
+def add_bias(a: Matrix, bias: list[float]) -> Matrix:
+    return [[x + bias[i] for i, x in enumerate(row)] for row in a]
 
 
 def scale(a: Matrix, factor: float) -> Matrix:
@@ -114,13 +122,17 @@ def layer_norm(values: Matrix, gamma: list[float], beta: list[float], epsilon: f
 
 def multi_head_attention(x: Matrix, base: int, traces: dict[str, Matrix], layer: int) -> Matrix:
     wq = load_weights(HIDDEN, HIDDEN, base + 0)
+    bq = load_bias(HIDDEN, base + 800)
     wk = load_weights(HIDDEN, HIDDEN, base + 1000)
+    bk = load_bias(HIDDEN, base + 1800)
     wv = load_weights(HIDDEN, HIDDEN, base + 2000)
+    bv = load_bias(HIDDEN, base + 2800)
     wo = load_weights(HIDDEN, HIDDEN, base + 3000)
+    bo = load_bias(HIDDEN, base + 3800)
 
-    q = matmul(x, wq)
-    k = matmul(x, wk)
-    v = matmul(x, wv)
+    q = add_bias(matmul(x, wq), bq)
+    k = add_bias(matmul(x, wk), bk)
+    v = add_bias(matmul(x, wv), bv)
 
     contexts: list[Matrix] = []
     for head in range(NUM_HEADS):
@@ -134,20 +146,22 @@ def multi_head_attention(x: Matrix, base: int, traces: dict[str, Matrix], layer:
             traces["layer0_head0_scores"] = scores
             traces["layer0_head0_probs"] = probs
 
-    return matmul(concat_heads(contexts), wo)
+    return add_bias(matmul(concat_heads(contexts), wo), bo)
 
 
 def encoder_layer(hidden: Matrix, layer: int, traces: dict[str, Matrix]) -> Matrix:
     base = layer * LAYER_WEIGHT_STRIDE
     w1 = load_weights(HIDDEN, FFN_HIDDEN, base + 4000)
+    b1 = load_bias(FFN_HIDDEN, base + 4800)
     w2 = load_weights(FFN_HIDDEN, HIDDEN, base + 5000)
+    b2 = load_bias(HIDDEN, base + 5800)
     attn_gamma, attn_beta = load_layer_norm_params(base + 6000)
     ffn_gamma, ffn_beta = load_layer_norm_params(base + 7000)
 
     attn_out = multi_head_attention(hidden, base, traces, layer)
     attn_residual = layer_norm(add(hidden, attn_out), attn_gamma, attn_beta)
-    ffn_hidden = gelu_poly(matmul(attn_residual, w1))
-    ffn_out = matmul(ffn_hidden, w2)
+    ffn_hidden = gelu_poly(add_bias(matmul(attn_residual, w1), b1))
+    ffn_out = add_bias(matmul(ffn_hidden, w2), b2)
     out = layer_norm(add(attn_residual, ffn_out), ffn_gamma, ffn_beta)
     traces[f"layer{layer}_out"] = out
     return out

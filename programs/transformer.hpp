@@ -6,7 +6,11 @@
 #include "../protocols/Protocols.h"
 #include "functions/GEMM.hpp"
 #include "functions/max_min.hpp"
+#include <algorithm>
+#include <cstdlib>
+#include <fstream>
 #include <cmath>
+#include <string>
 #include <vector>
 
 #if FUNCTION_IDENTIFIER == 87
@@ -51,6 +55,27 @@ static_assert(HIDDEN % NUM_HEADS == 0, "PPTI TinyBERT requires HIDDEN to be divi
 constexpr int HEAD_DIM = HIDDEN / NUM_HEADS;
 constexpr int LAYER_WEIGHT_STRIDE = 10000;
 
+inline int linear_param_count(int in_features, int out_features)
+{
+    return in_features * out_features + out_features;
+}
+
+inline int expected_model_params()
+{
+    const int attention_params = 4 * linear_param_count(HIDDEN, HIDDEN);
+    const int ffn_params = linear_param_count(HIDDEN, FFN_HIDDEN) + linear_param_count(FFN_HIDDEN, HIDDEN);
+    const int layer_norm_params = 4 * HIDDEN;
+    return NUM_LAYERS * (attention_params + ffn_params + layer_norm_params);
+}
+
+struct ModelWeights
+{
+    bool loaded = false;
+    bool attempted = false;
+    std::vector<float> params;
+    std::size_t cursor = 0;
+};
+
 inline UINT_TYPE fixed(float value, int frac_bits = FRACTIONAL)
 {
     return FloatFixedConverter<FLOATTYPE, INT_TYPE, UINT_TYPE, FRACTIONAL>::float_to_ufixed(value, frac_bits);
@@ -64,6 +89,73 @@ inline float input_value(int i)
 inline float weight_value(int i)
 {
     return ((i % 11) - 5) * 0.03125f;
+}
+
+inline std::string model_file_path()
+{
+    const char* ppti_model_file = std::getenv("PPTI_MODEL_FILE");
+    if (ppti_model_file != nullptr)
+        return std::string(ppti_model_file);
+
+    const char* model_file = std::getenv("MODEL_FILE");
+    if (model_file == nullptr)
+        return "";
+
+    std::string file(model_file);
+    if (!file.empty() && file[0] == '/')
+        return file;
+
+    const char* model_dir = std::getenv("MODEL_DIR");
+    if (model_dir == nullptr)
+        return file;
+
+    return std::string(model_dir) + "/" + file;
+}
+
+inline ModelWeights& model_weights()
+{
+    static ModelWeights weights;
+    if (weights.attempted)
+        return weights;
+
+    weights.attempted = true;
+    const std::string path = model_file_path();
+    if (path.empty())
+        return weights;
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+        return weights;
+
+    int total_params = 0;
+    in.read(reinterpret_cast<char*>(&total_params), sizeof(int));
+    if (total_params != expected_model_params())
+        return weights;
+
+    weights.params.resize(total_params);
+    in.read(reinterpret_cast<char*>(weights.params.data()), sizeof(float) * total_params);
+    weights.loaded = static_cast<int>(in.gcount()) == static_cast<int>(sizeof(float) * total_params);
+    if (!weights.loaded)
+        weights.params.clear();
+    return weights;
+}
+
+inline bool take_weight_values(std::vector<float>& values)
+{
+    ModelWeights& weights = model_weights();
+    if (!weights.loaded)
+        return false;
+    if (weights.cursor + values.size() > weights.params.size())
+        return false;
+
+    std::copy(weights.params.begin() + weights.cursor, weights.params.begin() + weights.cursor + values.size(), values.begin());
+    weights.cursor += values.size();
+    return true;
+}
+
+inline void reset_weight_cursor()
+{
+    model_weights().cursor = 0;
 }
 
 template <typename A>
@@ -87,12 +179,15 @@ void load_inputs(std::vector<A>& x)
 template <typename A>
 void load_weights(std::vector<A>& w, int offset)
 {
+    std::vector<float> values(w.size());
+    const bool from_file = take_weight_values(values);
     for (int i = 0; i < static_cast<int>(w.size()); i++)
     {
+        UINT_TYPE value = fixed(from_file ? values[i] : weight_value(i + offset));
 #if MODELOWNER == -1
-        w[i] = A(fixed(weight_value(i + offset)));
+        w[i] = A(value);
 #else
-        w[i].template prepare_receive_and_replicate<MODELOWNER>(fixed(weight_value(i + offset)));
+        w[i].template prepare_receive_and_replicate<MODELOWNER>(value);
 #endif
     }
 #if MODELOWNER != -1
@@ -105,10 +200,14 @@ void load_weights(std::vector<A>& w, int offset)
 template <typename A>
 void load_layer_norm_params(std::vector<A>& gamma, std::vector<A>& beta, int offset)
 {
+    std::vector<float> gamma_values(gamma.size());
+    std::vector<float> beta_values(beta.size());
+    const bool gamma_from_file = take_weight_values(gamma_values);
+    const bool beta_from_file = take_weight_values(beta_values);
     for (int i = 0; i < static_cast<int>(gamma.size()); i++)
     {
-        UINT_TYPE gamma_value = fixed(1.0f + weight_value(offset + i));
-        UINT_TYPE beta_value = fixed(weight_value(offset + 1000 + i));
+        UINT_TYPE gamma_value = fixed(gamma_from_file ? gamma_values[i] : 1.0f + weight_value(offset + i));
+        UINT_TYPE beta_value = fixed(beta_from_file ? beta_values[i] : weight_value(offset + 1000 + i));
 #if MODELOWNER == -1
         gamma[i] = A(gamma_value);
         beta[i] = A(beta_value);
@@ -128,6 +227,27 @@ void load_layer_norm_params(std::vector<A>& gamma, std::vector<A>& beta, int off
 }
 
 template <typename A>
+void load_bias(std::vector<A>& bias, int offset)
+{
+    std::vector<float> values(bias.size());
+    const bool from_file = take_weight_values(values);
+    for (int i = 0; i < static_cast<int>(bias.size()); i++)
+    {
+        UINT_TYPE value = fixed(from_file ? values[i] : weight_value(i + offset));
+#if MODELOWNER == -1
+        bias[i] = A(value);
+#else
+        bias[i].template prepare_receive_and_replicate<MODELOWNER>(value);
+#endif
+    }
+#if MODELOWNER != -1
+    A::communicate();
+    for (int i = 0; i < static_cast<int>(bias.size()); i++)
+        bias[i].template complete_receive_from<MODELOWNER>();
+#endif
+}
+
+template <typename A>
 void secure_matmul(std::vector<A>& lhs,
                    std::vector<A>& rhs,
                    std::vector<A>& out,
@@ -139,6 +259,14 @@ void secure_matmul(std::vector<A>& lhs,
     prepare_GEMM(lhs.data(), rhs.data(), out.data(), rows, cols, inner, false);
     A::communicate();
     complete_GEMM(out.data(), rows * cols);
+}
+
+template <typename A>
+void add_bias(std::vector<A>& matrix, const std::vector<A>& bias, int rows, int cols)
+{
+    for (int r = 0; r < rows; r++)
+        for (int c = 0; c < cols; c++)
+            matrix[r * cols + c] += bias[c];
 }
 
 template <typename A>
@@ -430,12 +558,19 @@ void secure_multi_head_attention(std::vector<A>& x,
                                  std::vector<A>& wk,
                                  std::vector<A>& wv,
                                  std::vector<A>& wo,
+                                 std::vector<A>& bq,
+                                 std::vector<A>& bk,
+                                 std::vector<A>& bv,
+                                 std::vector<A>& bo,
                                  std::vector<A>& out)
 {
     std::vector<A> q(SEQ_LEN * HIDDEN), k(SEQ_LEN * HIDDEN), v(SEQ_LEN * HIDDEN);
     secure_matmul(x, wq, q, SEQ_LEN, HIDDEN, HIDDEN);
     secure_matmul(x, wk, k, SEQ_LEN, HIDDEN, HIDDEN);
     secure_matmul(x, wv, v, SEQ_LEN, HIDDEN, HIDDEN);
+    add_bias(q, bq, SEQ_LEN, HIDDEN);
+    add_bias(k, bk, SEQ_LEN, HIDDEN);
+    add_bias(v, bv, SEQ_LEN, HIDDEN);
 
     std::vector<A> concat_context(SEQ_LEN * HIDDEN, A(0));
     for (int head = 0; head < NUM_HEADS; head++)
@@ -456,6 +591,7 @@ void secure_multi_head_attention(std::vector<A>& x,
     }
 
     secure_matmul(concat_context, wo, out, SEQ_LEN, HIDDEN, HIDDEN);
+    add_bias(out, bo, SEQ_LEN, HIDDEN);
 }
 
 template <typename A>
@@ -463,28 +599,38 @@ void secure_tinybert_encoder_layer(std::vector<A>& hidden, int layer)
 {
     const int base = layer * LAYER_WEIGHT_STRIDE;
     std::vector<A> wq(HIDDEN * HIDDEN), wk(HIDDEN * HIDDEN), wv(HIDDEN * HIDDEN), wo(HIDDEN * HIDDEN);
+    std::vector<A> bq(HIDDEN), bk(HIDDEN), bv(HIDDEN), bo(HIDDEN);
     std::vector<A> w1(HIDDEN * FFN_HIDDEN), w2(FFN_HIDDEN * HIDDEN);
+    std::vector<A> b1(FFN_HIDDEN), b2(HIDDEN);
     std::vector<A> attn_gamma(HIDDEN), attn_beta(HIDDEN), ffn_gamma(HIDDEN), ffn_beta(HIDDEN);
 
     load_weights(wq, base + 0);
+    load_bias(bq, base + 800);
     load_weights(wk, base + 1000);
+    load_bias(bk, base + 1800);
     load_weights(wv, base + 2000);
+    load_bias(bv, base + 2800);
     load_weights(wo, base + 3000);
+    load_bias(bo, base + 3800);
     load_weights(w1, base + 4000);
+    load_bias(b1, base + 4800);
     load_weights(w2, base + 5000);
+    load_bias(b2, base + 5800);
     load_layer_norm_params(attn_gamma, attn_beta, base + 6000);
     load_layer_norm_params(ffn_gamma, ffn_beta, base + 7000);
 
     std::vector<A> attn_out(SEQ_LEN * HIDDEN), attn_residual(SEQ_LEN * HIDDEN);
-    secure_multi_head_attention(hidden, wq, wk, wv, wo, attn_out);
+    secure_multi_head_attention(hidden, wq, wk, wv, wo, bq, bk, bv, bo, attn_out);
     for (int i = 0; i < static_cast<int>(hidden.size()); i++)
         attn_residual[i] = hidden[i] + attn_out[i];
     secure_rowwise_layer_norm(attn_residual, attn_gamma, attn_beta, SEQ_LEN, HIDDEN);
 
     std::vector<A> ffn_hidden(SEQ_LEN * FFN_HIDDEN), ffn_out(SEQ_LEN * HIDDEN);
     secure_matmul(attn_residual, w1, ffn_hidden, SEQ_LEN, HIDDEN, FFN_HIDDEN);
+    add_bias(ffn_hidden, b1, SEQ_LEN, FFN_HIDDEN);
     secure_gelu_poly(ffn_hidden);
     secure_matmul(ffn_hidden, w2, ffn_out, SEQ_LEN, FFN_HIDDEN, HIDDEN);
+    add_bias(ffn_out, b2, SEQ_LEN, HIDDEN);
 
     for (int i = 0; i < static_cast<int>(hidden.size()); i++)
         hidden[i] = attn_residual[i] + ffn_out[i];
@@ -499,6 +645,21 @@ void transformer_inference(DATATYPE* res)
     using namespace ppti_tinybert;
 
     std::vector<A> hidden(SEQ_LEN * HIDDEN);
+    reset_weight_cursor();
+    if (model_weights().loaded)
+    {
+        print_online("PPTI TinyBERT: loaded model weights from file.");
+    }
+    else
+    {
+        print_online("PPTI TinyBERT: using deterministic dummy weights.");
+    }
+    if (std::getenv("PPTI_VALIDATE_MODEL_ONLY") != nullptr)
+    {
+        res[0] = model_weights().loaded ? 1 : 0;
+        print_online("PPTI TinyBERT: model-file validation only.");
+        return;
+    }
     print_online("PPTI TinyBERT: sharing input embeddings...");
     load_inputs(hidden);
 

@@ -155,6 +155,7 @@ PPTI_FFN_HIDDEN
 protocol_executer.hpp
 programs/transformer.hpp
 scripts/ppti_reference.py
+scripts/ppti_export_tinybert.py
 docs/PPTI_WORKFLOW.md
 StudyNote/PPTI-Demo.md
 ```
@@ -166,6 +167,7 @@ StudyNote/PPTI-Demo.md
 | `protocol_executer.hpp` | 将 `FUNCTION_IDENTIFIER=87` 分发到 PPTI Transformer 程序 |
 | `programs/transformer.hpp` | HPMPC 上的 TinyBERT-style 安全推理 smoke 实现 |
 | `scripts/ppti_reference.py` | 无依赖明文参考，用同样的 dummy 输入、权重和近似函数复刻 C++ 逻辑 |
+| `scripts/ppti_export_tinybert.py` | 导出 HuggingFace TinyBERT encoder 权重到 PPTI 顺序二进制 layout，也可生成 synthetic smoke 权重 |
 | `docs/PPTI_WORKFLOW.md` | 开发流程、测试命令、后续路线 |
 | `StudyNote/PPTI-Demo.md` | 本实验说明文档 |
 
@@ -269,6 +271,58 @@ CUDA 在当前 tiny 维度下比 CPU 慢是正常的，因为矩阵非常小，G
 
 ## 7. 编译宏切换真实 TinyBERT 形状
 
+当前 C++ 端会优先读取 `PPTI_MODEL_FILE` 指定的权重文件。文件格式为：
+
+```text
+int32 total_parameter_count
+float32 parameters...
+```
+
+每层参数顺序：
+
+```text
+query.weight.T, query.bias
+key.weight.T, key.bias
+value.weight.T, value.bias
+attention.output.dense.weight.T, attention.output.dense.bias
+intermediate.dense.weight.T, intermediate.dense.bias
+output.dense.weight.T, output.dense.bias
+attention.output.LayerNorm.weight, attention.output.LayerNorm.bias
+output.LayerNorm.weight, output.LayerNorm.bias
+```
+
+先用 synthetic 权重验证文件加载链路：
+
+```sh
+cd /home/user/hpmpc
+python3 scripts/ppti_export_tinybert.py --synthetic --output models/ppti/tinybert_ppti_synthetic.bin
+PPTI_MODEL_FILE=models/ppti/tinybert_ppti_synthetic.bin scripts/run.sh -p all -n 3
+```
+
+真实 TinyBERT 权重导出命令：
+
+```sh
+python3 scripts/ppti_export_tinybert.py \
+  --model huawei-noah/TinyBERT_General_4L_312D \
+  --output models/ppti/tinybert_4l_312d_ppti.bin
+```
+
+远端已经安装 CPU 版 PyTorch、`transformers` 和新版 `pillow`，并成功导出真实 TinyBERT encoder 权重：
+
+```text
+models/ppti/tinybert_4l_312d_ppti.bin
+params=4568736
+topology=layers:4 heads:12 hidden:312 ffn_hidden:1200
+layout=ppti_tinybert_v1
+```
+
+该文件 header 与 C++ 真实 shape 参数公式一致：
+
+```text
+params=4568736
+expected=4568736
+```
+
 当前代码支持通过 `MACRO_FLAGS` 切换形状。例如真实 TinyBERT-like 形状可尝试：
 
 ```sh
@@ -277,14 +331,14 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
   MACRO_FLAGS="-DPPTI_SEQ_LEN=128 -DPPTI_HIDDEN=312 -DPPTI_NUM_HEADS=12 -DPPTI_NUM_LAYERS=4 -DPPTI_FFN_HIDDEN=1200"
 ```
 
-注意：这一步目前只是形状编译入口。真正跑 TinyBERT 权重还需要完成权重导出和加载路径，否则仍然使用 dummy `weight_value()`。
+注意：真实权重运行需要同时满足 `MACRO_FLAGS` 的 shape 与导出的权重 shape 完全一致，否则 C++ 会因为参数数量不匹配而回退到 dummy 权重路径。
 
 ## 8. 当前实现的限制
 
 当前版本是协议骨架，不是最终精度版本：
 
 1. 输入是 dummy embedding，还没有 tokenizer/embedding table。
-2. 权重是 dummy deterministic values，还没有加载 HuggingFace TinyBERT 权重。
+2. 已有权重文件加载路径和 HuggingFace 导出脚本，真实 TinyBERT encoder 权重已经导出；但输入 embedding/tokenizer 路径还未接入。
 3. Softmax 使用二阶多项式 exp 近似，精度有限。
 4. GELU 使用 cubic surrogate，尚未校准。
 5. LayerNorm 使用 Newton reciprocal sqrt，但初值和迭代次数仍需针对真实数值范围调优。
@@ -300,13 +354,9 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
    - layer0 head0 scores
    - layer0 head0 probs
    - layer output
-3. 实现 TinyBERT HuggingFace 权重导出脚本。
-4. 定义 HPMPC 权重二进制布局：
-   - per layer WQ/WK/WV/WO
-   - FFN W1/W2
-   - attention LayerNorm gamma/beta
-   - FFN LayerNorm gamma/beta
-5. 将 dummy `load_weights()` 替换成文件加载。
+3. 增加真实 token embedding / input embedding 文件加载。
+4. 用真实 shape 运行完整协议，记录 CPU/CUDA 时间和通信量。
+5. 增加 C++ fixed-point trace reveal，与 PyTorch/TinyBERT 明文输出逐层对齐。
 6. 加 attention mask。
 7. 改进 Softmax 和 GELU 近似。
 8. 用真实 TinyBERT 维度分别 benchmark CPU/CUDA。
