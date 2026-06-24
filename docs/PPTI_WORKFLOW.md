@@ -72,11 +72,15 @@ P1 send=5.201MB getTime=6.297832s
 P2 send=5.201MB getTime=6.298222s
 ```
 
-CUDA seq=16 experimental run:
+CUDA seq=16 post-reboot run:
 
 ```text
-completed, getTime ~= 5.97s
-not a trusted benchmark because CUTLASS emitted many "Error Internal at: 44" messages
+GPU=RTX 2060 compute_cap=7.5
+CUTLASS objects rebuilt with arch=sm_75
+completed with no CUTLASS/error/failed entries
+P0 send=7.099MB getTime=6.397868s
+P1 send=5.201MB getTime=6.396788s
+P2 send=5.201MB getTime=6.397518s
 ```
 
 Synthetic model-file smoke test:

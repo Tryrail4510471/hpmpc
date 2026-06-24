@@ -17,7 +17,7 @@ branch: master
 - `FUNCTION_IDENTIFIER=87` 接入 PPTI Transformer 程序。
 - TinyBERT-style encoder smoke test 已跑通。
 - `prepare_GEMM` CPU 路径已跑通。
-- CUDA GEMM 可编译，但 tiny GEMM 下 CUTLASS 会打印 internal error，暂不作为性能结论。
+- CUDA GEMM 可编译。重启机器并按 RTX 2060 的 `sm_75` 重新编译 CUTLASS 对象后，真实 `seq=16` TinyBERT CUDA 路径已无 CUTLASS error。
 - `scripts/ppti_export_tinybert.py` 可导出 HuggingFace TinyBERT encoder 权重。
 - `scripts/ppti_export_tinybert_inputs.py` 可导出 embedding 权重和 input id 文件。
 - 真实 TinyBERT encoder 权重已导出：
@@ -429,7 +429,7 @@ scripts/run.sh -p all -n 3
 输出值可 reveal
 ```
 
-已完成状态：完成 CPU baseline。
+已完成状态：完成 CPU baseline；完成 post-reboot CUDA seq16 复测。
 
 实际输入：
 
@@ -468,7 +468,16 @@ CPU 性能结果：
 | P1 | 0MB, 5.201MB | 0.000008MB, 5.201MB | 6.297832s | 6.297812s |
 | P2 | 5.201MB, 0.000008MB | 5.201MB, 7.099MB | 6.298222s | 6.298200s |
 
-CUDA 试运行：
+CUDA 复测准备：
+
+RTX 2060 的 compute capability 是 `7.5`，需要先按 `sm_75` 重编 CUTLASS 对象。旧对象若按 `sm_89` 编译，或 NVIDIA driver/library 版本不一致，可能触发 `Got cutlass error: Error Internal at: 44`。
+
+```sh
+make -C core/cuda clean
+make -C core/cuda arch=sm_75 CUDA_PATH=/usr/local/cuda CUTLASS_PATH=/home/user/cutlass
+```
+
+CUDA 编译：
 
 ```sh
 make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRACTIONAL=14 USE_CUDA_GEMM=2 \
@@ -479,16 +488,21 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 CUDA 结果：
 
 ```text
-程序完整结束，getTime 约 5.97s。
-但日志大量出现 Got cutlass error: Error Internal at: 44。
-因此 CUDA 结果只记录为实验性运行，不作为可信性能结论。
+post-reboot sm_75 run completed.
+log contains no CUTLASS/error/failed entries.
 ```
+
+| party | send | receive | getTime | chrono |
+| --- | ---: | ---: | ---: | ---: |
+| P0 | 7.099MB, 0.000008MB | 0.000008MB, 0MB | 6.397868s | 6.397859s |
+| P1 | 0MB, 5.201MB | 0.000008MB, 5.201MB | 6.396788s | 6.396780s |
+| P2 | 5.201MB, 0.000008MB | 5.201MB, 7.099MB | 6.397518s | 6.397507s |
 
 阶段结论：
 
 - 真实 TinyBERT 权重、真实 embedding、真实 tokenizer input 的 `seq=16` 端到端 HPMPC CPU 推理已经跑通。
 - 当前可信 CPU baseline 为约 `6.30s` online time。
-- CUDA backend 仍需修 CUTLASS 小/中矩阵 error 或增加 CPU fallback 后再评估。
+- 当前 CUDA seq16 复测可干净完成，online time 约 `6.40s`。在此 tiny shape 下 CUDA 未体现加速，主要受小矩阵、host/device copy 和 kernel launch 开销影响。
 
 ## 阶段 6：近似函数升级
 
