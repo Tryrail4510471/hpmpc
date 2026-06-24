@@ -328,6 +328,14 @@ inline bool build_embedding_inputs(std::vector<float>& values)
     return true;
 }
 
+inline std::vector<int> current_attention_mask()
+{
+    InputIds& input = input_ids();
+    if (input.loaded)
+        return input.attention_mask;
+    return std::vector<int>(SEQ_LEN, 1);
+}
+
 template <typename A>
 void load_inputs(std::vector<A>& x)
 {
@@ -673,7 +681,7 @@ void secure_rowwise_layer_norm(std::vector<A>& values, const std::vector<A>& gam
 }
 
 template <typename A>
-void secure_rowwise_softmax_poly(std::vector<A>& scores, int rows, int cols)
+void secure_rowwise_softmax_poly(std::vector<A>& scores, int rows, int cols, const std::vector<int>& attention_mask)
 {
     std::vector<A> row_max(rows);
     max_min_sint<0, BITLENGTH>(scores.data(), cols, row_max.data(), rows, true);
@@ -702,6 +710,19 @@ void secure_rowwise_softmax_poly(std::vector<A>& scores, int rows, int cols)
     // Current exp approximation: exp(x) ~= 1 + x + 0.5*x^2 after row-max stabilization.
     for (int i = 0; i < static_cast<int>(scores.size()); i++)
         scores[i] = A(fixed(1.0f)) + scores[i] + squared[i];
+
+    for (int r = 0; r < rows; r++)
+    {
+        for (int c = 0; c < cols; c++)
+        {
+            int idx = r * cols + c;
+            UINT_TYPE keep = fixed((c < static_cast<int>(attention_mask.size()) && attention_mask[c] != 0) ? 1.0f : 0.0f);
+            scores[idx] = scores[idx].prepare_mult_public_fixed(keep);
+        }
+    }
+    A::communicate();
+    for (auto& value : scores)
+        value.complete_public_mult_fixed();
 
     std::vector<A> row_sum(rows, A(0));
     for (int r = 0; r < rows; r++)
@@ -737,6 +758,7 @@ void secure_multi_head_attention(std::vector<A>& x,
                                  std::vector<A>& bo,
                                  std::vector<A>& out)
 {
+    const std::vector<int> attention_mask = current_attention_mask();
     std::vector<A> q(SEQ_LEN * HIDDEN), k(SEQ_LEN * HIDDEN), v(SEQ_LEN * HIDDEN);
     secure_matmul(x, wq, q, SEQ_LEN, HIDDEN, HIDDEN);
     secure_matmul(x, wk, k, SEQ_LEN, HIDDEN, HIDDEN);
@@ -758,7 +780,7 @@ void secure_multi_head_attention(std::vector<A>& x,
         transpose(kh, kh_t, SEQ_LEN, HEAD_DIM);
         secure_matmul(qh, kh_t, scores, SEQ_LEN, HEAD_DIM, SEQ_LEN);
         scale_public(scores, 1.0f / std::sqrt(static_cast<float>(HEAD_DIM)));
-        secure_rowwise_softmax_poly(scores, SEQ_LEN, SEQ_LEN);
+        secure_rowwise_softmax_poly(scores, SEQ_LEN, SEQ_LEN, attention_mask);
         secure_matmul(scores, vh, context, SEQ_LEN, SEQ_LEN, HEAD_DIM);
         place_head(context, concat_context, head);
     }

@@ -33,8 +33,8 @@ ffn_hidden=1200
 
 当前缺口：
 
-- token ids 到 input embedding 的路径已接入，attention mask 已进入 input file layout。
-- attention mask 尚未接入 Softmax 计算。
+- token ids 到 input embedding 的路径已接入。
+- attention mask 已进入 input file layout，并已接入 attention Softmax。
 - 真实 TinyBERT 完整安全推理尚未运行。
 - 尚未做 C++ fixed-point trace 与 PyTorch 明文逐层对齐。
 - Softmax/GELU 仍是 smoke 级近似。
@@ -229,11 +229,23 @@ mask[col] = 0 for valid token
 mask[col] = large negative value for padding token
 ```
 
-MPC 注意事项：
+实现方式：
 
-- mask 可以视为公开输入。
-- fixed-point 下 large negative 不能过大，否则可能溢出。
-- 当前二阶 exp 近似在负区间不稳定，因此 mask 设计要配合 Softmax 近似一起调整。
+```text
+scores
+  -> subtract row max
+  -> exp polynomial approximation
+  -> multiply exp_approx[col] by public attention_mask[col]
+  -> row_sum over unmasked positions
+  -> normalize
+```
+
+说明：
+
+- mask 视为公开输入。
+- 当前 Softmax 仍使用二阶多项式 `exp(x) ~= 1 + x + 0.5x^2`。
+- 如果直接向 score 加很大的负数，平方项会让 masked 位置重新变大，因此当前采用 exp 后清零的实现。
+- 后续更换 Softmax 近似后，可以再改回标准 additive mask。
 
 验收标准：
 
@@ -241,6 +253,37 @@ MPC 注意事项：
 无 padding 时输出与旧路径一致
 有 padding 时 masked position 的 attention probability 接近 0
 Python reference 与 C++ trace 对齐
+```
+
+已完成状态：完成。
+
+实际验证：
+
+```sh
+python3 scripts/ppti_export_tinybert_inputs.py --synthetic --seq-len 4 --synthetic-pad-from 2 \
+  --embedding-output models/ppti/tinybert_embeddings_mask_synthetic.bin \
+  --input-output models/ppti/sample_input_seq4_masked.bin
+
+PPTI_EMBEDDING_FILE=models/ppti/tinybert_embeddings_mask_synthetic.bin \
+PPTI_INPUT_FILE=models/ppti/sample_input_seq4_masked.bin \
+scripts/run.sh -p all -n 3
+```
+
+测试 input 文件内容：
+
+```text
+seq=4
+token_ids=[1, 2, 0, 0]
+token_type_ids=[0, 1, 0, 0]
+position_ids=[0, 1, 2, 3]
+attention_mask=[1, 1, 0, 0]
+```
+
+结果：
+
+```text
+masked synthetic smoke test 通过
+真实 seq=16 validation-only 通过
 ```
 
 ## 阶段 4：Trace 对齐
@@ -400,17 +443,18 @@ git push origin master
 
 ## 下一步执行建议
 
-下一步直接进入阶段 2：
+下一步直接进入阶段 4：
 
 ```text
-实现 attention mask 接入 Softmax。
+建立 C++ fixed-point trace 与 Python reference 的逐层误差对齐流程。
 ```
 
 最小可交付结果：
 
 ```text
-scores_h[row, col] += mask[col]
-无 padding 时输出保持一致
-有 padding 时 masked position 概率接近 0
-StudyNote/PPTI-TaskFlow.md 更新阶段 3 完成状态
+PPTI_TRACE=1
+reveal layer0_head0_scores / probs / layer output
+Python reference 输出同名 trace
+记录 max_abs_error / mean_abs_error
+StudyNote/PPTI-TaskFlow.md 更新阶段 4 完成状态
 ```

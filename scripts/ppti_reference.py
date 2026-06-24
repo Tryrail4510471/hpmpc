@@ -94,12 +94,14 @@ def concat_heads(heads: list[Matrix]) -> Matrix:
     return out
 
 
-def softmax_poly(scores: Matrix) -> Matrix:
+def softmax_poly(scores: Matrix, attention_mask: list[int] | None = None) -> Matrix:
     out: Matrix = []
     for row in scores:
         row_max = max(row)
         shifted = [x - row_max for x in row]
         exp_approx = [1.0 + x + 0.5 * x * x for x in shifted]
+        if attention_mask is not None:
+            exp_approx = [x if attention_mask[i] != 0 else 0.0 for i, x in enumerate(exp_approx)]
         denom = sum(exp_approx)
         out.append([x / denom for x in exp_approx])
     return out
@@ -120,7 +122,7 @@ def layer_norm(values: Matrix, gamma: list[float], beta: list[float], epsilon: f
     return out
 
 
-def multi_head_attention(x: Matrix, base: int, traces: dict[str, Matrix], layer: int) -> Matrix:
+def multi_head_attention(x: Matrix, base: int, traces: dict[str, Matrix], layer: int, attention_mask: list[int]) -> Matrix:
     wq = load_weights(HIDDEN, HIDDEN, base + 0)
     bq = load_bias(HIDDEN, base + 800)
     wk = load_weights(HIDDEN, HIDDEN, base + 1000)
@@ -140,7 +142,7 @@ def multi_head_attention(x: Matrix, base: int, traces: dict[str, Matrix], layer:
         kh = extract_head(k, head)
         vh = extract_head(v, head)
         scores = scale(matmul(qh, transpose(kh)), 1.0 / math.sqrt(HEAD_DIM))
-        probs = softmax_poly(scores)
+        probs = softmax_poly(scores, attention_mask)
         contexts.append(matmul(probs, vh))
         if layer == 0 and head == 0:
             traces["layer0_head0_scores"] = scores
@@ -158,7 +160,8 @@ def encoder_layer(hidden: Matrix, layer: int, traces: dict[str, Matrix]) -> Matr
     attn_gamma, attn_beta = load_layer_norm_params(base + 6000)
     ffn_gamma, ffn_beta = load_layer_norm_params(base + 7000)
 
-    attn_out = multi_head_attention(hidden, base, traces, layer)
+    attention_mask = traces.get("attention_mask_vector", [[1 for _ in range(SEQ_LEN)]])[0]
+    attn_out = multi_head_attention(hidden, base, traces, layer, [int(x) for x in attention_mask])
     attn_residual = layer_norm(add(hidden, attn_out), attn_gamma, attn_beta)
     ffn_hidden = gelu_poly(add_bias(matmul(attn_residual, w1), b1))
     ffn_out = add_bias(matmul(ffn_hidden, w2), b2)
@@ -169,7 +172,7 @@ def encoder_layer(hidden: Matrix, layer: int, traces: dict[str, Matrix]) -> Matr
 
 def forward() -> tuple[Matrix, dict[str, Matrix]]:
     hidden = load_inputs()
-    traces: dict[str, Matrix] = {"input": hidden}
+    traces: dict[str, Matrix] = {"input": hidden, "attention_mask_vector": [[1 for _ in range(SEQ_LEN)]]}
     for layer in range(NUM_LAYERS):
         hidden = encoder_layer(hidden, layer, traces)
     return hidden, traces

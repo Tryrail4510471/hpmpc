@@ -131,14 +131,13 @@ distribution, not only last-layer argmax behavior.
 
 The detailed execution checklist lives in `StudyNote/PPTI-TaskFlow.md`.
 
-1. Add attention mask support before Softmax.
-2. Add fixed-point trace comparison between `programs/transformer.hpp` and
+1. Add fixed-point trace comparison between `programs/transformer.hpp` and
    `scripts/ppti_reference.py`.
-3. Run real TinyBERT weights with a small real sequence length such as 16.
-4. Replace the quadratic exp approximation with a better MPC-friendly
+2. Run real TinyBERT weights with a small real sequence length such as 16.
+3. Replace the quadratic exp approximation with a better MPC-friendly
    approximation or lookup/range-reduction design.
-5. Replace the cubic GELU surrogate with a calibrated approximation and measure
+4. Replace the cubic GELU surrogate with a calibrated approximation and measure
    task accuracy.
-6. Calibrate fixed-point precision and truncation.
-7. Scale constants from smoke dimensions to TinyBERT dimensions, then benchmark
+5. Calibrate fixed-point precision and truncation.
+6. Scale constants from smoke dimensions to TinyBERT dimensions, then benchmark
    CPU and CUDA paths separately.

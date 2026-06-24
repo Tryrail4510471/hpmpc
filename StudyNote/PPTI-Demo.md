@@ -334,6 +334,8 @@ embedding_params=9683856
 embedding_shape=vocab:30522 max_position:512 type_vocab:2 hidden:312
 ```
 
+Attention mask 已接入 attention Softmax。当前实现没有直接加大负数 mask，而是在多项式 exp 近似之后、row sum 之前用公开 mask 清零 masked token 的概率质量；这是为了避免二阶 exp 近似在大负数处因平方项失真。
+
 当前代码支持通过 `MACRO_FLAGS` 切换形状。例如真实 TinyBERT-like 形状可尝试：
 
 ```sh

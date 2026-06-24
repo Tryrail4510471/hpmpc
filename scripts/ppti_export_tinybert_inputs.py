@@ -72,11 +72,16 @@ def synthetic_embedding_chunks(vocab_size: int, max_position: int, type_vocab_si
     ]
 
 
-def synthetic_input(seq_len: int, vocab_size: int, type_vocab_size: int) -> tuple[list[int], list[int], list[int], list[int]]:
+def synthetic_input(seq_len: int, vocab_size: int, type_vocab_size: int, pad_from: int) -> tuple[list[int], list[int], list[int], list[int]]:
     token_ids = [(i + 1) % vocab_size for i in range(seq_len)]
     token_type_ids = [i % type_vocab_size for i in range(seq_len)]
     position_ids = list(range(seq_len))
     attention_mask = [1 for _ in range(seq_len)]
+    if 0 <= pad_from < seq_len:
+        for i in range(pad_from, seq_len):
+            token_ids[i] = 0
+            token_type_ids[i] = 0
+            attention_mask[i] = 0
     return token_ids, token_type_ids, position_ids, attention_mask
 
 
@@ -140,6 +145,7 @@ def main() -> None:
     parser.add_argument("--text", default="privacy preserving transformer inference")
     parser.add_argument("--seq-len", type=int, default=16)
     parser.add_argument("--synthetic", action="store_true")
+    parser.add_argument("--synthetic-pad-from", type=int, default=-1, help="Set synthetic attention_mask to 0 from this index.")
     parser.add_argument("--hidden", type=int, default=8, help="Synthetic hidden size.")
     parser.add_argument("--vocab-size", type=int, default=32, help="Synthetic vocab size.")
     parser.add_argument("--max-position", type=int, default=32, help="Synthetic max position embeddings.")
@@ -149,7 +155,7 @@ def main() -> None:
     if args.synthetic:
         chunks = synthetic_embedding_chunks(args.vocab_size, args.max_position, args.type_vocab_size, args.hidden)
         token_ids, token_type_ids, position_ids, attention_mask = synthetic_input(
-            args.seq_len, args.vocab_size, args.type_vocab_size
+            args.seq_len, args.vocab_size, args.type_vocab_size, args.synthetic_pad_from
         )
         vocab_size, max_position, type_vocab_size, hidden = (
             args.vocab_size,
