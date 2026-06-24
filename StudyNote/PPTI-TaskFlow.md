@@ -319,6 +319,76 @@ smoke shape 下每个 reveal 点有 Python reference 对应值
 明确误差主要来自 Softmax/GELU/rsqrt 哪一项
 ```
 
+已完成状态：完成。
+
+实际新增：
+
+```text
+PPTI_TRACE=1 编译开关
+scripts/ppti_compare_trace.py
+scripts/ppti_reference.py --trace
+```
+
+Makefile 已支持这些 PPTI 宏：
+
+```text
+PPTI_SEQ_LEN
+PPTI_HIDDEN
+PPTI_NUM_HEADS
+PPTI_NUM_LAYERS
+PPTI_FFN_HIDDEN
+PPTI_TRACE
+```
+
+trace 命令：
+
+```sh
+cd /home/user/hpmpc
+python3 scripts/ppti_reference.py --trace > /tmp/ppti_python_trace.log
+
+make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRACTIONAL=14 \
+  USE_CUDA_GEMM=0 PPTI_TRACE=1
+
+scripts/run.sh -p all -n 3 > /tmp/ppti_cpp_trace.log
+
+python3 scripts/ppti_compare_trace.py \
+  --reference /tmp/ppti_python_trace.log \
+  --candidate /tmp/ppti_cpp_trace.log
+```
+
+trace 点：
+
+```text
+embedding_out
+layer0_head0_scores
+layer0_head0_probs
+layer0_out
+layer1_out
+layer2_out
+layer3_out
+final_output
+```
+
+当前 smoke 误差：
+
+| trace | max_abs_error | mean_abs_error |
+| --- | ---: | ---: |
+| embedding_out | 0 | 0 |
+| layer0_head0_scores | 0.0242097552 | 0.0125943368 |
+| layer0_head0_probs | 0.004290848 | 0.00309257975 |
+| layer0_out | 0.81499594 | 0.220199583 |
+| layer1_out | 1.04883559 | 0.235772405 |
+| layer2_out | 0.814369096 | 0.197987481 |
+| layer3_out | 0.68885958 | 0.154242283 |
+| final_output | 0.68885958 | 0.154242283 |
+
+结论：
+
+- `embedding_out` 完全对齐，说明输入/embedding 路径正确。
+- 第一处明显误差从 `layer0_head0_scores` 开始，主要来自 HPMPC fixed-point GEMM/截断与 Python float reference 的差异。
+- `layer0_head0_probs` 误差较小，但经过 LayerNorm、GELU 和后续层后被放大。
+- 下一步优先做 fixed-point Python reference 或 C++ trace 的定点仿真，而不是盲目改协议。
+
 ## 阶段 5：真实 TinyBERT 小样本端到端
 
 目标：用真实 TinyBERT 权重、真实 tokenizer 输入、真实 shape 跑一次端到端安全推理。
@@ -443,18 +513,17 @@ git push origin master
 
 ## 下一步执行建议
 
-下一步直接进入阶段 4：
+下一步直接进入阶段 5，并并行准备阶段 6：
 
 ```text
-建立 C++ fixed-point trace 与 Python reference 的逐层误差对齐流程。
+用真实 TinyBERT seq=16 尝试端到端安全推理，同时建立 fixed-point Python reference。
 ```
 
 最小可交付结果：
 
 ```text
-PPTI_TRACE=1
-reveal layer0_head0_scores / probs / layer output
-Python reference 输出同名 trace
-记录 max_abs_error / mean_abs_error
-StudyNote/PPTI-TaskFlow.md 更新阶段 4 完成状态
+真实 seq=16 协议完整结束
+记录 online getTime / 通信量
+fixed-point reference 可以复现 layer0_head0_scores 误差方向
+StudyNote/PPTI-TaskFlow.md 更新阶段 5 状态
 ```

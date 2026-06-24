@@ -336,6 +336,8 @@ embedding_shape=vocab:30522 max_position:512 type_vocab:2 hidden:312
 
 Attention mask 已接入 attention Softmax。当前实现没有直接加大负数 mask，而是在多项式 exp 近似之后、row sum 之前用公开 mask 清零 masked token 的概率质量；这是为了避免二阶 exp 近似在大负数处因平方项失真。
 
+阶段四已建立 C++ fixed-point trace 与 Python reference 的比较流程。当前 smoke 结果显示 `embedding_out` 完全对齐，第一处误差从 `layer0_head0_scores` 开始，最终输出 `max_abs_error` 约为 `0.68885958`。这说明下一步应先做 fixed-point Python reference 和真实 seq=16 小样本运行，再优化 Softmax/GELU。
+
 当前代码支持通过 `MACRO_FLAGS` 切换形状。例如真实 TinyBERT-like 形状可尝试：
 
 ```sh

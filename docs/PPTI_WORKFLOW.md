@@ -45,6 +45,24 @@ Plaintext reference:
 python3 scripts/ppti_reference.py --dump
 ```
 
+Trace comparison:
+
+```sh
+python3 scripts/ppti_reference.py --trace > /tmp/ppti_python_trace.log
+make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRACTIONAL=14 USE_CUDA_GEMM=0 PPTI_TRACE=1
+scripts/run.sh -p all -n 3 > /tmp/ppti_cpp_trace.log
+python3 scripts/ppti_compare_trace.py --reference /tmp/ppti_python_trace.log --candidate /tmp/ppti_cpp_trace.log
+```
+
+Current smoke trace result:
+
+```text
+embedding_out max_abs_error=0
+layer0_head0_scores max_abs_error=0.0242097552
+layer0_head0_probs max_abs_error=0.004290848
+final_output max_abs_error=0.68885958
+```
+
 Synthetic model-file smoke test:
 
 ```sh
@@ -131,9 +149,9 @@ distribution, not only last-layer argmax behavior.
 
 The detailed execution checklist lives in `StudyNote/PPTI-TaskFlow.md`.
 
-1. Add fixed-point trace comparison between `programs/transformer.hpp` and
-   `scripts/ppti_reference.py`.
-2. Run real TinyBERT weights with a small real sequence length such as 16.
+1. Run real TinyBERT weights with a small real sequence length such as 16.
+2. Add a Python fixed-point reference so trace error can separate quantization
+   from protocol/approximation error.
 3. Replace the quadratic exp approximation with a better MPC-friendly
    approximation or lookup/range-reduction design.
 4. Replace the cubic GELU surrogate with a calibrated approximation and measure

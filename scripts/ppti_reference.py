@@ -172,9 +172,10 @@ def encoder_layer(hidden: Matrix, layer: int, traces: dict[str, Matrix]) -> Matr
 
 def forward() -> tuple[Matrix, dict[str, Matrix]]:
     hidden = load_inputs()
-    traces: dict[str, Matrix] = {"input": hidden, "attention_mask_vector": [[1 for _ in range(SEQ_LEN)]]}
+    traces: dict[str, Matrix] = {"embedding_out": hidden, "attention_mask_vector": [[1 for _ in range(SEQ_LEN)]]}
     for layer in range(NUM_LAYERS):
         hidden = encoder_layer(hidden, layer, traces)
+    traces["final_output"] = hidden
     return hidden, traces
 
 
@@ -184,15 +185,36 @@ def print_matrix(name: str, values: Matrix) -> None:
         print("  " + " ".join(f"{x:+.8f}" for x in row))
 
 
+def print_trace(name: str, values: Matrix) -> None:
+    rows = len(values)
+    cols = len(values[0]) if rows else 0
+    flat = [x for row in values for x in row]
+    print("PPTI_TRACE " + name + f" {rows} {cols} " + " ".join(f"{x:.9g}" for x in flat))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the PPTI TinyBERT plaintext reference.")
     parser.add_argument("--dump", action="store_true", help="Print intermediate matrices.")
+    parser.add_argument("--trace", action="store_true", help="Print machine-readable PPTI_TRACE lines.")
     args = parser.parse_args()
 
     output, traces = forward()
     print(f"ppti_reference_out0={output[0][0]:+.8f}")
     print(f"ppti_reference_shape={len(output)}x{len(output[0])}")
     print(f"ppti_reference_topology=layers:{NUM_LAYERS} heads:{NUM_HEADS} hidden:{HIDDEN} seq:{SEQ_LEN}")
+    if args.trace:
+        for name in [
+            "embedding_out",
+            "layer0_head0_scores",
+            "layer0_head0_probs",
+            "layer0_out",
+            "layer1_out",
+            "layer2_out",
+            "layer3_out",
+            "final_output",
+        ]:
+            if name in traces:
+                print_trace(name, traces[name])
     if args.dump:
         for name, values in traces.items():
             print_matrix(name, values)

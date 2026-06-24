@@ -51,6 +51,12 @@ constexpr int FFN_HIDDEN = 16;
 constexpr int FFN_HIDDEN = PPTI_FFN_HIDDEN;
 #endif
 
+#ifndef PPTI_TRACE
+constexpr int TRACE_ENABLED = 0;
+#else
+constexpr int TRACE_ENABLED = PPTI_TRACE;
+#endif
+
 static_assert(HIDDEN % NUM_HEADS == 0, "PPTI TinyBERT requires HIDDEN to be divisible by NUM_HEADS.");
 constexpr int HEAD_DIM = HIDDEN / NUM_HEADS;
 constexpr int LAYER_WEIGHT_STRIDE = 10000;
@@ -443,6 +449,31 @@ void secure_matmul(std::vector<A>& lhs,
 }
 
 template <typename A>
+void trace_matrix(const char* name, const std::vector<A>& values, int rows, int cols)
+{
+    if constexpr (TRACE_ENABLED == 1)
+    {
+        for (const auto& value : values)
+            value.prepare_reveal_to_all();
+        A::communicate();
+
+        std::vector<float> revealed(values.size());
+        for (int i = 0; i < static_cast<int>(values.size()); i++)
+        {
+            UINT_TYPE raw = values[i].complete_reveal_to_all();
+            revealed[i] = FloatFixedConverter<FLOATTYPE, INT_TYPE, UINT_TYPE, FRACTIONAL>::ufixed_to_float(raw);
+        }
+
+#if PARTY == 0
+        std::cout << "PPTI_TRACE " << name << " " << rows << " " << cols;
+        for (float value : revealed)
+            std::cout << " " << value;
+        std::cout << std::endl;
+#endif
+    }
+}
+
+template <typename A>
 void add_bias(std::vector<A>& matrix, const std::vector<A>& bias, int rows, int cols)
 {
     for (int r = 0; r < rows; r++)
@@ -756,6 +787,7 @@ void secure_multi_head_attention(std::vector<A>& x,
                                  std::vector<A>& bk,
                                  std::vector<A>& bv,
                                  std::vector<A>& bo,
+                                 int layer,
                                  std::vector<A>& out)
 {
     const std::vector<int> attention_mask = current_attention_mask();
@@ -780,7 +812,11 @@ void secure_multi_head_attention(std::vector<A>& x,
         transpose(kh, kh_t, SEQ_LEN, HEAD_DIM);
         secure_matmul(qh, kh_t, scores, SEQ_LEN, HEAD_DIM, SEQ_LEN);
         scale_public(scores, 1.0f / std::sqrt(static_cast<float>(HEAD_DIM)));
+        if (layer == 0 && head == 0)
+            trace_matrix("layer0_head0_scores", scores, SEQ_LEN, SEQ_LEN);
         secure_rowwise_softmax_poly(scores, SEQ_LEN, SEQ_LEN, attention_mask);
+        if (layer == 0 && head == 0)
+            trace_matrix("layer0_head0_probs", scores, SEQ_LEN, SEQ_LEN);
         secure_matmul(scores, vh, context, SEQ_LEN, SEQ_LEN, HEAD_DIM);
         place_head(context, concat_context, head);
     }
@@ -815,7 +851,7 @@ void secure_tinybert_encoder_layer(std::vector<A>& hidden, int layer)
     load_layer_norm_params(ffn_gamma, ffn_beta, base + 7000);
 
     std::vector<A> attn_out(SEQ_LEN * HIDDEN), attn_residual(SEQ_LEN * HIDDEN);
-    secure_multi_head_attention(hidden, wq, wk, wv, wo, bq, bk, bv, bo, attn_out);
+    secure_multi_head_attention(hidden, wq, wk, wv, wo, bq, bk, bv, bo, layer, attn_out);
     for (int i = 0; i < static_cast<int>(hidden.size()); i++)
         attn_residual[i] = hidden[i] + attn_out[i];
     secure_rowwise_layer_norm(attn_residual, attn_gamma, attn_beta, SEQ_LEN, HIDDEN);
@@ -830,6 +866,15 @@ void secure_tinybert_encoder_layer(std::vector<A>& hidden, int layer)
     for (int i = 0; i < static_cast<int>(hidden.size()); i++)
         hidden[i] = attn_residual[i] + ffn_out[i];
     secure_rowwise_layer_norm(hidden, ffn_gamma, ffn_beta, SEQ_LEN, HIDDEN);
+
+    if (layer == 0)
+        trace_matrix("layer0_out", hidden, SEQ_LEN, HIDDEN);
+    else if (layer == 1)
+        trace_matrix("layer1_out", hidden, SEQ_LEN, HIDDEN);
+    else if (layer == 2)
+        trace_matrix("layer2_out", hidden, SEQ_LEN, HIDDEN);
+    else if (layer == 3)
+        trace_matrix("layer3_out", hidden, SEQ_LEN, HIDDEN);
 }
 }  // namespace ppti_tinybert
 
@@ -876,6 +921,7 @@ void transformer_inference(DATATYPE* res)
     }
     print_online("PPTI TinyBERT: sharing input embeddings...");
     load_inputs(hidden);
+    trace_matrix("embedding_out", hidden, SEQ_LEN, HIDDEN);
 
     for (int layer = 0; layer < NUM_LAYERS; layer++)
     {
@@ -886,5 +932,6 @@ void transformer_inference(DATATYPE* res)
     hidden[0].prepare_reveal_to_all();
     A::communicate();
     res[0] = hidden[0].complete_reveal_to_all();
+    trace_matrix("final_output", hidden, SEQ_LEN, HIDDEN);
     print_online("PPTI TinyBERT smoke test completed.");
 }
