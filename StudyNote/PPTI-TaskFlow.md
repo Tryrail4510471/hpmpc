@@ -429,6 +429,67 @@ scripts/run.sh -p all -n 3
 输出值可 reveal
 ```
 
+已完成状态：完成 CPU baseline。
+
+实际输入：
+
+```text
+PPTI_MODEL_FILE=models/ppti/tinybert_4l_312d_ppti.bin
+PPTI_EMBEDDING_FILE=models/ppti/tinybert_embeddings_ppti.bin
+PPTI_INPUT_FILE=models/ppti/sample_input_seq16.bin
+seq_len=16
+hidden=312
+heads=12
+layers=4
+ffn_hidden=1200
+```
+
+CPU 编译命令：
+
+```sh
+make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRACTIONAL=14 USE_CUDA_GEMM=0 \
+  PPTI_SEQ_LEN=16 PPTI_HIDDEN=312 PPTI_NUM_HEADS=12 PPTI_NUM_LAYERS=4 PPTI_FFN_HIDDEN=1200
+```
+
+CPU 运行命令：
+
+```sh
+PPTI_MODEL_FILE=models/ppti/tinybert_4l_312d_ppti.bin \
+PPTI_EMBEDDING_FILE=models/ppti/tinybert_embeddings_ppti.bin \
+PPTI_INPUT_FILE=models/ppti/sample_input_seq16.bin \
+scripts/run.sh -p all -n 3 > /tmp/ppti_seq16_cpu.log
+```
+
+CPU 性能结果：
+
+| party | send | receive | getTime | chrono |
+| --- | ---: | ---: | ---: | ---: |
+| P0 | 7.099MB, 0.000008MB | 0.000008MB, 0MB | 6.298142s | 6.298120s |
+| P1 | 0MB, 5.201MB | 0.000008MB, 5.201MB | 6.297832s | 6.297812s |
+| P2 | 5.201MB, 0.000008MB | 5.201MB, 7.099MB | 6.298222s | 6.298200s |
+
+CUDA 试运行：
+
+```sh
+make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRACTIONAL=14 USE_CUDA_GEMM=2 \
+  NVCC=/usr/local/cuda/bin/nvcc \
+  PPTI_SEQ_LEN=16 PPTI_HIDDEN=312 PPTI_NUM_HEADS=12 PPTI_NUM_LAYERS=4 PPTI_FFN_HIDDEN=1200
+```
+
+CUDA 结果：
+
+```text
+程序完整结束，getTime 约 5.97s。
+但日志大量出现 Got cutlass error: Error Internal at: 44。
+因此 CUDA 结果只记录为实验性运行，不作为可信性能结论。
+```
+
+阶段结论：
+
+- 真实 TinyBERT 权重、真实 embedding、真实 tokenizer input 的 `seq=16` 端到端 HPMPC CPU 推理已经跑通。
+- 当前可信 CPU baseline 为约 `6.30s` online time。
+- CUDA backend 仍需修 CUTLASS 小/中矩阵 error 或增加 CPU fallback 后再评估。
+
 ## 阶段 6：近似函数升级
 
 目标：把 smoke 级近似替换为可用于真实 TinyBERT 精度评估的近似。
@@ -513,17 +574,16 @@ git push origin master
 
 ## 下一步执行建议
 
-下一步直接进入阶段 5，并并行准备阶段 6：
+下一步进入阶段 6：
 
 ```text
-用真实 TinyBERT seq=16 尝试端到端安全推理，同时建立 fixed-point Python reference。
+建立 fixed-point Python reference，并开始校准 Softmax/GELU/LayerNorm 近似。
 ```
 
 最小可交付结果：
 
 ```text
-真实 seq=16 协议完整结束
-记录 online getTime / 通信量
 fixed-point reference 可以复现 layer0_head0_scores 误差方向
-StudyNote/PPTI-TaskFlow.md 更新阶段 5 状态
+Softmax/GELU 近似替换前后有 trace 误差对比
+StudyNote/PPTI-TaskFlow.md 更新阶段 6 状态
 ```

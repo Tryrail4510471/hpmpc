@@ -63,6 +63,22 @@ layer0_head0_probs max_abs_error=0.004290848
 final_output max_abs_error=0.68885958
 ```
 
+Real TinyBERT seq=16 CPU baseline:
+
+```text
+shape=seq16 hidden312 heads12 layers4 ffn1200
+P0 send=7.099MB getTime=6.298142s
+P1 send=5.201MB getTime=6.297832s
+P2 send=5.201MB getTime=6.298222s
+```
+
+CUDA seq=16 experimental run:
+
+```text
+completed, getTime ~= 5.97s
+not a trusted benchmark because CUTLASS emitted many "Error Internal at: 44" messages
+```
+
 Synthetic model-file smoke test:
 
 ```sh
@@ -149,13 +165,12 @@ distribution, not only last-layer argmax behavior.
 
 The detailed execution checklist lives in `StudyNote/PPTI-TaskFlow.md`.
 
-1. Run real TinyBERT weights with a small real sequence length such as 16.
-2. Add a Python fixed-point reference so trace error can separate quantization
+1. Add a Python fixed-point reference so trace error can separate quantization
    from protocol/approximation error.
-3. Replace the quadratic exp approximation with a better MPC-friendly
+2. Replace the quadratic exp approximation with a better MPC-friendly
    approximation or lookup/range-reduction design.
-4. Replace the cubic GELU surrogate with a calibrated approximation and measure
+3. Replace the cubic GELU surrogate with a calibrated approximation and measure
    task accuracy.
-5. Calibrate fixed-point precision and truncation.
-6. Scale constants from smoke dimensions to TinyBERT dimensions, then benchmark
+4. Calibrate fixed-point precision and truncation.
+5. Scale constants from smoke dimensions to TinyBERT dimensions, then benchmark
    CPU and CUDA paths separately.
