@@ -108,14 +108,17 @@ distribution, not only last-layer argmax behavior.
 
 ## Next Milestones
 
-1. Add fixed-point trace comparison between `programs/transformer.hpp` and
+The detailed execution checklist lives in `StudyNote/PPTI-TaskFlow.md`.
+
+1. Add embedding and input-file paths for token ids, token type ids, position ids,
+   and attention mask.
+2. Add fixed-point trace comparison between `programs/transformer.hpp` and
    `scripts/ppti_reference.py`.
-2. Add HuggingFace/Pygeon export for TinyBERT weights in the layout expected by
-   the HPMPC Transformer program.
-3. Replace the quadratic exp approximation with a better MPC-friendly
+3. Run real TinyBERT weights with a small real sequence length such as 16.
+4. Replace the quadratic exp approximation with a better MPC-friendly
    approximation or lookup/range-reduction design.
-4. Replace the cubic GELU surrogate with a calibrated approximation and measure
+5. Replace the cubic GELU surrogate with a calibrated approximation and measure
    task accuracy.
-5. Add attention mask support before Softmax.
-6. Scale constants from smoke dimensions to TinyBERT dimensions, then benchmark
+6. Add attention mask support before Softmax.
+7. Scale constants from smoke dimensions to TinyBERT dimensions, then benchmark
    CPU and CUDA paths separately.

@@ -170,6 +170,7 @@ StudyNote/PPTI-Demo.md
 | `scripts/ppti_export_tinybert.py` | 导出 HuggingFace TinyBERT encoder 权重到 PPTI 顺序二进制 layout，也可生成 synthetic smoke 权重 |
 | `docs/PPTI_WORKFLOW.md` | 开发流程、测试命令、后续路线 |
 | `StudyNote/PPTI-Demo.md` | 本实验说明文档 |
+| `StudyNote/PPTI-TaskFlow.md` | 后续任务流程表，按阶段记录目标、输入输出、命令和验收标准 |
 
 ## 4. 明文参考测试
 
