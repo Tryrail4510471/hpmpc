@@ -102,10 +102,27 @@ layer0_out            max=5.62864423e14   mean=2.70766165e14
 final_output          max=3.41260919e14   mean=1.49881746e14
 ```
 
-Interpretation: real embeddings are aligned, but the first large divergence is
-at `layer0_head0_scores`.  The next debugging step is a lightweight statistical
-trace around Q/K projection and QK score matmul; full-tensor projection reveal
-is too invasive for the current protocol path.
+Projection-level statistical trace narrowed this down further:
+
+```text
+layer0_input_stats             max=0.00027148   mean=0.000183685
+layer0_wq_stats                max=0.00011719   mean=0.0000740674
+layer0_q_linear_stats original prepare_GEMM max=5.627e14 mean=4.667e14
+layer0_q_linear_stats manual dot baseline   max=0.00963574 mean=0.00625385
+layer0_head0_score_scaled_stats manual dot  max=0.0389966 mean=0.0261987
+```
+
+Interpretation: real embeddings and Q/K/V weights are aligned. The original
+`prepare_GEMM` path currently explodes on the large TinyBERT projection shape,
+while the manual dot-product baseline aligns projection and QK score statistics
+with the Python fixed-point reference. The first large divergence has therefore
+moved to attention Softmax:
+
+```text
+layer0_head0_probs max=5.44014034e14 mean=5.42012114e13
+layer0_out         max=5.62871964e14 mean=2.70765639e14
+final_output       max=3.41277026e14 mean=1.49881735e14
+```
 
 Synthetic model-file smoke test:
 

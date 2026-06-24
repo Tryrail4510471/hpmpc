@@ -443,9 +443,20 @@ void secure_matmul(std::vector<A>& lhs,
                    int cols)
 {
     std::fill(out.begin(), out.end(), A(0));
-    prepare_GEMM(lhs.data(), rhs.data(), out.data(), rows, cols, inner, false);
+    for (int r = 0; r < rows; r++)
+    {
+        for (int c = 0; c < cols; c++)
+        {
+            A sum(0);
+            for (int k = 0; k < inner; k++)
+                sum += lhs[r * inner + k].prepare_dot(rhs[k * cols + c]);
+            sum.mask_and_send_dot();
+            out[r * cols + c] = sum;
+        }
+    }
     A::communicate();
-    complete_GEMM(out.data(), rows * cols);
+    for (auto& value : out)
+        value.complete_mult();
 }
 
 template <typename A>
@@ -469,6 +480,43 @@ void trace_matrix(const char* name, const std::vector<A>& values, int rows, int 
         for (float value : revealed)
             std::cout << " " << value;
         std::cout << std::endl;
+#endif
+    }
+}
+
+template <typename A>
+void trace_stats(const char* name, const std::vector<A>& values)
+{
+    if constexpr (TRACE_ENABLED == 1)
+    {
+        for (const auto& value : values)
+            value.prepare_reveal_to_all();
+        A::communicate();
+
+        float min_value = 0.0f;
+        float max_value = 0.0f;
+        double abs_sum = 0.0;
+        for (int i = 0; i < static_cast<int>(values.size()); i++)
+        {
+            UINT_TYPE raw = values[i].complete_reveal_to_all();
+            const float revealed = FloatFixedConverter<FLOATTYPE, INT_TYPE, UINT_TYPE, FRACTIONAL>::ufixed_to_float(raw);
+            if (i == 0)
+            {
+                min_value = revealed;
+                max_value = revealed;
+            }
+            else
+            {
+                min_value = std::min(min_value, revealed);
+                max_value = std::max(max_value, revealed);
+            }
+            abs_sum += std::abs(static_cast<double>(revealed));
+        }
+
+#if PARTY == 0
+        const double mean_abs = values.empty() ? 0.0 : abs_sum / static_cast<double>(values.size());
+        std::cout << "PPTI_TRACE " << name << " 1 3 "
+                  << min_value << " " << max_value << " " << mean_abs << std::endl;
 #endif
     }
 }
@@ -792,12 +840,31 @@ void secure_multi_head_attention(std::vector<A>& x,
 {
     const std::vector<int> attention_mask = current_attention_mask();
     std::vector<A> q(SEQ_LEN * HIDDEN), k(SEQ_LEN * HIDDEN), v(SEQ_LEN * HIDDEN);
+    if (layer == 0)
+    {
+        trace_stats("layer0_input_stats", x);
+        trace_stats("layer0_wq_stats", wq);
+        trace_stats("layer0_wk_stats", wk);
+        trace_stats("layer0_wv_stats", wv);
+    }
     secure_matmul(x, wq, q, SEQ_LEN, HIDDEN, HIDDEN);
     secure_matmul(x, wk, k, SEQ_LEN, HIDDEN, HIDDEN);
     secure_matmul(x, wv, v, SEQ_LEN, HIDDEN, HIDDEN);
+    if (layer == 0)
+    {
+        trace_stats("layer0_q_linear_stats", q);
+        trace_stats("layer0_k_linear_stats", k);
+        trace_stats("layer0_v_linear_stats", v);
+    }
     add_bias(q, bq, SEQ_LEN, HIDDEN);
     add_bias(k, bk, SEQ_LEN, HIDDEN);
     add_bias(v, bv, SEQ_LEN, HIDDEN);
+    if (layer == 0)
+    {
+        trace_stats("layer0_q_stats", q);
+        trace_stats("layer0_k_stats", k);
+        trace_stats("layer0_v_stats", v);
+    }
 
     std::vector<A> concat_context(SEQ_LEN * HIDDEN, A(0));
     for (int head = 0; head < NUM_HEADS; head++)
@@ -808,12 +875,23 @@ void secure_multi_head_attention(std::vector<A>& x,
         extract_head(q, qh, head);
         extract_head(k, kh, head);
         extract_head(v, vh, head);
+        if (layer == 0 && head == 0)
+        {
+            trace_stats("layer0_head0_q_stats", qh);
+            trace_stats("layer0_head0_k_stats", kh);
+            trace_stats("layer0_head0_v_stats", vh);
+        }
 
         transpose(kh, kh_t, SEQ_LEN, HEAD_DIM);
         secure_matmul(qh, kh_t, scores, SEQ_LEN, HEAD_DIM, SEQ_LEN);
+        if (layer == 0 && head == 0)
+            trace_stats("layer0_head0_score_raw_stats", scores);
         scale_public(scores, 1.0f / std::sqrt(static_cast<float>(HEAD_DIM)));
         if (layer == 0 && head == 0)
+        {
+            trace_stats("layer0_head0_score_scaled_stats", scores);
             trace_matrix("layer0_head0_scores", scores, SEQ_LEN, SEQ_LEN);
+        }
         secure_rowwise_softmax_poly(scores, SEQ_LEN, SEQ_LEN, attention_mask);
         if (layer == 0 && head == 0)
             trace_matrix("layer0_head0_probs", scores, SEQ_LEN, SEQ_LEN);

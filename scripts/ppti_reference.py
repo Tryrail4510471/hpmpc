@@ -356,6 +356,13 @@ def layer_norm(values: Matrix, gamma: list[float], beta: list[float], cfg: Confi
     return out
 
 
+def matrix_stats(values: Matrix) -> Matrix:
+    flat = [x for row in values for x in row]
+    if not flat:
+        return [[0.0, 0.0, 0.0]]
+    return [[min(flat), max(flat), sum(abs(x) for x in flat) / len(flat)]]
+
+
 def multi_head_attention(
     x: Matrix,
     reader: ModelReader,
@@ -374,19 +381,41 @@ def multi_head_attention(
     wo = load_weights(reader, cfg.hidden, cfg.hidden, base + 3000, cfg)
     bo = load_bias(reader, cfg.hidden, base + 3800, cfg)
 
-    q_mat = add_bias(matmul(x, wq, cfg), bq, cfg)
-    k_mat = add_bias(matmul(x, wk, cfg), bk, cfg)
-    v_mat = add_bias(matmul(x, wv, cfg), bv, cfg)
+    if layer == 0:
+        traces["layer0_input_stats"] = matrix_stats(x)
+        traces["layer0_wq_stats"] = matrix_stats(wq)
+        traces["layer0_wk_stats"] = matrix_stats(wk)
+        traces["layer0_wv_stats"] = matrix_stats(wv)
+    q_linear = matmul(x, wq, cfg)
+    k_linear = matmul(x, wk, cfg)
+    v_linear = matmul(x, wv, cfg)
+    if layer == 0:
+        traces["layer0_q_linear_stats"] = matrix_stats(q_linear)
+        traces["layer0_k_linear_stats"] = matrix_stats(k_linear)
+        traces["layer0_v_linear_stats"] = matrix_stats(v_linear)
+    q_mat = add_bias(q_linear, bq, cfg)
+    k_mat = add_bias(k_linear, bk, cfg)
+    v_mat = add_bias(v_linear, bv, cfg)
+    if layer == 0:
+        traces["layer0_q_stats"] = matrix_stats(q_mat)
+        traces["layer0_k_stats"] = matrix_stats(k_mat)
+        traces["layer0_v_stats"] = matrix_stats(v_mat)
 
     contexts: list[Matrix] = []
     for head in range(cfg.heads):
         qh = extract_head(q_mat, head, cfg)
         kh = extract_head(k_mat, head, cfg)
         vh = extract_head(v_mat, head, cfg)
-        scores = scale(matmul(qh, transpose(kh), cfg), 1.0 / math.sqrt(cfg.head_dim), cfg)
+        raw_scores = matmul(qh, transpose(kh), cfg)
+        scores = scale(raw_scores, 1.0 / math.sqrt(cfg.head_dim), cfg)
         probs = softmax_poly(scores, attention_mask, cfg)
         contexts.append(matmul(probs, vh, cfg))
         if layer == 0 and head == 0:
+            traces["layer0_head0_q_stats"] = matrix_stats(qh)
+            traces["layer0_head0_k_stats"] = matrix_stats(kh)
+            traces["layer0_head0_v_stats"] = matrix_stats(vh)
+            traces["layer0_head0_score_raw_stats"] = matrix_stats(raw_scores)
+            traces["layer0_head0_score_scaled_stats"] = matrix_stats(scores)
             traces["layer0_head0_scores"] = scores
             traces["layer0_head0_probs"] = probs
 
@@ -484,6 +513,21 @@ def main() -> None:
     if args.trace:
         for name in [
             "embedding_out",
+            "layer0_input_stats",
+            "layer0_wq_stats",
+            "layer0_wk_stats",
+            "layer0_wv_stats",
+            "layer0_q_linear_stats",
+            "layer0_k_linear_stats",
+            "layer0_v_linear_stats",
+            "layer0_q_stats",
+            "layer0_k_stats",
+            "layer0_v_stats",
+            "layer0_head0_q_stats",
+            "layer0_head0_k_stats",
+            "layer0_head0_v_stats",
+            "layer0_head0_score_raw_stats",
+            "layer0_head0_score_scaled_stats",
             "layer0_head0_scores",
             "layer0_head0_probs",
             "layer0_out",

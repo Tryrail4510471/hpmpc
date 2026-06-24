@@ -577,6 +577,34 @@ C++       layer0_head0_scores: min=-1.316e10   max=1.284e10   mean_abs=4.6635631
 3. 对 attention score 加 clamp/range reduction，再进入 Softmax。
 4. 给 Softmax reciprocal 使用基于 row_sum 的更稳初值或归一化策略。
 
+补充进展：projection 级统计 trace 已接入，定位结果如下。
+
+- `layer0_input_stats`、`layer0_wq_stats`、`layer0_wk_stats`、`layer0_wv_stats` 均与 Python reference 对齐，说明真实 embedding 和第一层 Q/K/V 权重加载正确。
+- 原 `prepare_GEMM` 路径下，`layer0_q_linear_stats` 直接发散到 `±5.6e14`，说明爆炸发生在大矩阵 GEMM 输出阶段。
+- 将 PPTI 的 `secure_matmul` 临时切换为逐元素 dot-product 路径后，projection 和 score 对齐：
+
+```text
+layer0_q_linear_stats          max=0.00963574   mean=0.00625384667
+layer0_k_linear_stats          max=0.0105811    mean=0.00709233
+layer0_v_linear_stats          max=0.01052393   mean=0.00688174833
+layer0_head0_score_scaled_stats max=0.0389966   mean=0.0261987267
+layer0_head0_scores            max=0.1305347    mean=0.0399053072
+```
+
+新的第一处明显发散已经后移到 Softmax：
+
+```text
+layer0_head0_probs max=5.44014034e14 mean=5.42012114e13
+layer0_out         max=5.62871964e14 mean=2.70765639e14
+final_output       max=3.41277026e14 mean=1.49881735e14
+```
+
+阶段判断：
+
+- 当前先保留朴素 `secure_matmul` 作为正确性 baseline。
+- `prepare_GEMM` 大矩阵路径需要单独缩小复现，判断是大 `m*n` 输出数量、`inner=312`、还是 Transformer 权重范围触发的问题。
+- 真实 TinyBERT 端到端的下一处核心问题从 projection matmul 转移到 Softmax 近似和 reciprocal 初值。
+
 ## 阶段 7：近似函数升级
 
 目标：把 smoke 级近似替换为可用于真实 TinyBERT 精度评估的近似。

@@ -336,7 +336,7 @@ embedding_shape=vocab:30522 max_position:512 type_vocab:2 hidden:312
 
 Attention mask 已接入 attention Softmax。当前实现没有直接加大负数 mask，而是在多项式 exp 近似之后、row sum 之前用公开 mask 清零 masked token 的概率质量；这是为了避免二阶 exp 近似在大负数处因平方项失真。
 
-阶段四已建立 C++ fixed-point trace 与 Python reference 的比较流程。当前 smoke 结果显示 `embedding_out` 完全对齐，第一处误差从 `layer0_head0_scores` 开始，最终输出 `max_abs_error` 约为 `0.68885958`。这说明下一步应先做 fixed-point Python reference 和真实 seq=16 小样本运行，再优化 Softmax/GELU。
+阶段四已建立 C++ fixed-point trace 与 Python reference 的比较流程。smoke 结果显示 `embedding_out` 完全对齐，第一处误差从 `layer0_head0_scores` 开始，最终输出 `max_abs_error` 约为 `0.68885958`。真实 `seq=16` 统计 trace 进一步证明：embedding 与第一层 Q/K/V 权重加载正确，原 `prepare_GEMM` 路径在 TinyBERT 大投影形状下会把 `layer0_q_linear_stats` 放大到 `±5.6e14`；临时切换为逐元素 dot-product baseline 后，Q/K/V projection 与 QK score 已和 Python fixed-point reference 对齐，新的第一处明显发散后移到 attention Softmax。
 
 阶段五已完成真实 `seq=16` 小样本端到端 CPU/CUDA 推理。使用真实 TinyBERT encoder 权重、真实 embedding 权重和 tokenizer input，CPU online `getTime` 约 `6.30s`，通信量约 P0 发送 `7.099MB`、P1/P2 发送 `5.201MB`。机器重启后 `nvidia-smi` 正常，按 RTX 2060 的 `sm_75` 重编 CUTLASS 对象后，CUDA 复测无 CUTLASS error，online `getTime` 约 `6.40s`。
 
@@ -358,18 +358,17 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 2. Attention mask 已接入，但 Softmax 使用二阶多项式 exp 近似，真实 score 范围下精度不足。
 3. GELU 使用 cubic surrogate，尚未校准。
 4. LayerNorm 使用 Newton reciprocal sqrt，但初值和迭代次数仍需针对真实数值范围调优。
-5. C++ fixed-point reveal trace 与 Python reference 已建立第一轮对齐，当前第一处明显发散在 `layer0_head0_scores`。
-6. 额外 reveal Q/K/V projection 全张量会扰动当前协议路径，后续需要改成轻量统计 trace。
+5. C++ fixed-point reveal trace 与 Python reference 已建立第一轮对齐，当前正确性 baseline 使用逐元素 dot-product 矩阵乘。
+6. 原 `prepare_GEMM` 大矩阵路径需要单独缩小复现；当前端到端第一处明显发散已转移到 attention Softmax。
 
 ## 9. 下一步开发计划
 
 推荐下一步顺序：
 
-1. 增加轻量统计 trace，围绕 Q/K projection、QK score matmul 和 scale 后输出 min/max/mean_abs。
-2. 对 attention score 加 clamp/range reduction。
-3. 改进 Softmax reciprocal 初值或归一化策略。
-4. 校准 GELU 和 LayerNorm 近似。
-5. 在 `seq=16` 误差收敛后再扩大到 `seq=32/64/128`。
+1. 改进 attention Softmax 的 exp 近似、range reduction 和 reciprocal 初值。
+2. 单独构造 `prepare_GEMM` 大矩阵复现用例，定位 TinyBERT projection 爆值原因。
+3. 校准 GELU 和 LayerNorm 近似。
+4. 在 `seq=16` 误差收敛后再扩大到 `seq=32/64/128`。
 
 ## 10. 当前阶段结论
 
@@ -377,8 +376,8 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 
 这个阶段证明了：
 
-- Transformer 的核心矩阵乘可以接到 HPMPC 现有 `prepare_GEMM` 路径。
+- Transformer 的核心矩阵乘接口已经接入 HPMPC；当前正确性 baseline 先使用逐元素 dot-product，`prepare_GEMM` 大投影路径需继续定位。
 - Attention Softmax 的插入位置和调用链已经明确。
 - LayerNorm、GELU、residual、FFN 可以在 HPMPC 算术分享层组合出来。
 - CPU 和 CUDA GEMM backend 均可运行。
-- 后续工作可以集中在真实权重导出、定点精度校准和 Softmax/GELU 协议优化上。
+- 后续工作可以集中在 Softmax、GELU、LayerNorm 近似优化，以及 `prepare_GEMM` 大矩阵路径修复上。
