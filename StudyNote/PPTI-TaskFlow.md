@@ -504,7 +504,80 @@ log contains no CUTLASS/error/failed entries.
 - 当前可信 CPU baseline 为约 `6.30s` online time。
 - 当前 CUDA seq16 复测可干净完成，online time 约 `6.40s`。在此 tiny shape 下 CUDA 未体现加速，主要受小矩阵、host/device copy 和 kernel launch 开销影响。
 
-## 阶段 6：近似函数升级
+## 阶段 6：真实 seq16 fixed-point trace 对齐
+
+目标：把真实 `seq=16` 路径的 C++ reveal trace 与 Python fixed-point reference 对齐，找到第一处明显发散的位置。
+
+已完成状态：完成第一轮真实 fixed-point trace 对齐。
+
+Python reference 命令：
+
+```sh
+python3 scripts/ppti_reference.py --fixed --trace \
+  --seq-len 16 --hidden 312 --heads 12 --layers 4 --ffn-hidden 1200 --fractional 14 \
+  --model-file models/ppti/tinybert_4l_312d_ppti.bin \
+  --embedding-file models/ppti/tinybert_embeddings_ppti.bin \
+  --input-file models/ppti/sample_input_seq16.bin \
+  > /tmp/ppti_seq16_fixed_reference.log
+```
+
+C++ trace 编译：
+
+```sh
+make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRACTIONAL=14 \
+  USE_CUDA_GEMM=0 PPTI_TRACE=1 \
+  PPTI_SEQ_LEN=16 PPTI_HIDDEN=312 PPTI_NUM_HEADS=12 PPTI_NUM_LAYERS=4 PPTI_FFN_HIDDEN=1200
+```
+
+注意：`scripts/run.sh -p all` 会把三方 stdout 混在一起，大 trace 行可能被其他 party 日志打断。trace 比较时应分离 P0/P1/P2 输出，只使用 P0 日志作为 candidate。
+
+比较命令：
+
+```sh
+python3 scripts/ppti_compare_trace.py \
+  --reference /tmp/ppti_seq16_fixed_reference.log \
+  --candidate /tmp/ppti_seq16_cpp_trace_P0.log \
+  > /tmp/ppti_seq16_trace_compare.csv
+```
+
+第一轮误差表：
+
+| trace | shape | max_abs_error | mean_abs_error |
+| --- | ---: | ---: | ---: |
+| embedding_out | 16x312 | 0.0011582 | 0.000195694 |
+| layer0_head0_scores | 16x16 | 1.316e10 | 4.66356313e9 |
+| layer0_head0_probs | 16x16 | 5.43968633e14 | 5.42056872e13 |
+| layer0_out | 16x312 | 5.62864423e14 | 2.70766165e14 |
+| layer1_out | 16x312 | 5.62592851e14 | 2.73550013e14 |
+| layer2_out | 16x312 | 5.62818678e14 | 2.79705209e14 |
+| layer3_out | 16x312 | 3.41260919e14 | 1.49881746e14 |
+| final_output | 16x312 | 3.41260919e14 | 1.49881746e14 |
+
+数值范围观察：
+
+```text
+reference embedding_out: min=-8.31573486 max=3.02172852 mean_abs=0.402614435
+C++       embedding_out: min=-8.316      max=3.022      mean_abs=0.402615008
+
+reference layer0_head0_scores: min=-10.7826538 max=29.6589966 mean_abs=6.95825339
+C++       layer0_head0_scores: min=-1.316e10   max=1.284e10   mean_abs=4.66356313e9
+```
+
+阶段结论：
+
+- 真实 embedding 路径已经基本对齐。
+- 第一处明显发散出现在 `layer0_head0_scores`，也就是 Q/K projection 后的 attention score matmul/scale 附近。
+- 现有 Softmax reciprocal Newton 初值也不适合真实 score 范围，reference 自身在 `layer0_head0_probs` 开始出现巨大数值。
+- 尝试在 C++ 中额外 reveal Q/K/V projection 张量会触发 `malloc(): unaligned tcache chunk detected`，后续需要改成轻量统计 trace，而不是全张量 reveal。
+
+下一步优先级：
+
+1. 给 `secure_matmul` 增加可选统计 trace，只 reveal min/max/mean_abs，不 reveal 全矩阵。
+2. 在 Q/K projection、QK score、scale 后分别记录统计量，确认 score 爆炸是 projection 输出过大还是 score matmul 溢出。
+3. 对 attention score 加 clamp/range reduction，再进入 Softmax。
+4. 给 Softmax reciprocal 使用基于 row_sum 的更稳初值或归一化策略。
+
+## 阶段 7：近似函数升级
 
 目标：把 smoke 级近似替换为可用于真实 TinyBERT 精度评估的近似。
 

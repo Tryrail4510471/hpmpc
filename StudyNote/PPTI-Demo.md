@@ -354,29 +354,22 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 
 当前版本是协议骨架，不是最终精度版本：
 
-1. 输入是 dummy embedding，还没有 tokenizer/embedding table。
-2. 已有权重文件加载路径和 HuggingFace 导出脚本，真实 TinyBERT encoder 权重已经导出；但输入 embedding/tokenizer 路径还未接入。
-3. Softmax 使用二阶多项式 exp 近似，精度有限。
-4. GELU 使用 cubic surrogate，尚未校准。
-5. LayerNorm 使用 Newton reciprocal sqrt，但初值和迭代次数仍需针对真实数值范围调优。
-6. 尚未实现 attention mask。
-7. 尚未做 C++ fixed-point reveal trace 与 Python reference 的逐层误差对齐。
+1. 真实 TinyBERT encoder 权重、embedding 权重和 tokenizer input 路径已经接入。
+2. Attention mask 已接入，但 Softmax 使用二阶多项式 exp 近似，真实 score 范围下精度不足。
+3. GELU 使用 cubic surrogate，尚未校准。
+4. LayerNorm 使用 Newton reciprocal sqrt，但初值和迭代次数仍需针对真实数值范围调优。
+5. C++ fixed-point reveal trace 与 Python reference 已建立第一轮对齐，当前第一处明显发散在 `layer0_head0_scores`。
+6. 额外 reveal Q/K/V projection 全张量会扰动当前协议路径，后续需要改成轻量统计 trace。
 
 ## 9. 下一步开发计划
 
 推荐下一步顺序：
 
-1. 增加 C++ trace reveal 模式，只在 debug 编译时 reveal 中间矩阵。
-2. 用 `scripts/ppti_reference.py --dump` 对齐：
-   - layer0 head0 scores
-   - layer0 head0 probs
-   - layer output
-3. 增加真实 token embedding / input embedding 文件加载。
-4. 用真实 shape 运行完整协议，记录 CPU/CUDA 时间和通信量。
-5. 增加 C++ fixed-point trace reveal，与 PyTorch/TinyBERT 明文输出逐层对齐。
-6. 加 attention mask。
-7. 改进 Softmax 和 GELU 近似。
-8. 用真实 TinyBERT 维度分别 benchmark CPU/CUDA。
+1. 增加轻量统计 trace，围绕 Q/K projection、QK score matmul 和 scale 后输出 min/max/mean_abs。
+2. 对 attention score 加 clamp/range reduction。
+3. 改进 Softmax reciprocal 初值或归一化策略。
+4. 校准 GELU 和 LayerNorm 近似。
+5. 在 `seq=16` 误差收敛后再扩大到 `seq=32/64/128`。
 
 ## 10. 当前阶段结论
 

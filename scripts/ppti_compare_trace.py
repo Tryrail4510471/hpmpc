@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,18 +16,26 @@ class TraceTensor:
     values: list[float]
 
 
+FLOAT_RE = re.compile(r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?")
+
+
 def load_trace(path: Path) -> dict[str, TraceTensor]:
     traces: dict[str, TraceTensor] = {}
     for line in path.read_text(errors="replace").splitlines():
-        if not line.startswith("PPTI_TRACE "):
+        marker = "PPTI_TRACE "
+        if marker not in line:
             continue
-        parts = line.split()
-        if len(parts) < 5:
+        payload = line.split(marker, 1)[1]
+        parts = payload.split(maxsplit=3)
+        if len(parts) < 4:
             continue
-        name = parts[1]
-        rows = int(parts[2])
-        cols = int(parts[3])
-        values = [float(x) for x in parts[4:]]
+        name = parts[0]
+        rows = int(parts[1])
+        cols = int(parts[2])
+        expected = rows * cols
+        values = [float(match.group(0)) for match in FLOAT_RE.finditer(parts[3])]
+        if len(values) > expected:
+            values = values[:expected]
         if len(values) != rows * cols:
             raise SystemExit(f"{path}: trace {name} has {len(values)} values, expected {rows * cols}.")
         traces[name] = TraceTensor(rows, cols, values)

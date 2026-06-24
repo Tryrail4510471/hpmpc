@@ -83,6 +83,30 @@ P1 send=5.201MB getTime=6.396788s
 P2 send=5.201MB getTime=6.397518s
 ```
 
+Real seq=16 fixed-point trace comparison:
+
+```text
+python3 scripts/ppti_reference.py --fixed --trace --seq-len 16 --hidden 312 --heads 12 --layers 4 --ffn-hidden 1200 --fractional 14 \
+  --model-file models/ppti/tinybert_4l_312d_ppti.bin \
+  --embedding-file models/ppti/tinybert_embeddings_ppti.bin \
+  --input-file models/ppti/sample_input_seq16.bin
+```
+
+First comparison result:
+
+```text
+embedding_out         max=0.0011582       mean=0.000195694
+layer0_head0_scores   max=1.316e10        mean=4.66356313e9
+layer0_head0_probs    max=5.43968633e14   mean=5.42056872e13
+layer0_out            max=5.62864423e14   mean=2.70766165e14
+final_output          max=3.41260919e14   mean=1.49881746e14
+```
+
+Interpretation: real embeddings are aligned, but the first large divergence is
+at `layer0_head0_scores`.  The next debugging step is a lightweight statistical
+trace around Q/K projection and QK score matmul; full-tensor projection reveal
+is too invasive for the current protocol path.
+
 Synthetic model-file smoke test:
 
 ```sh
