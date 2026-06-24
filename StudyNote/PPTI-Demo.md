@@ -168,6 +168,7 @@ StudyNote/PPTI-Demo.md
 | `programs/transformer.hpp` | HPMPC 上的 TinyBERT-style 安全推理 smoke 实现 |
 | `scripts/ppti_reference.py` | 无依赖明文参考，用同样的 dummy 输入、权重和近似函数复刻 C++ 逻辑 |
 | `scripts/ppti_export_tinybert.py` | 导出 HuggingFace TinyBERT encoder 权重到 PPTI 顺序二进制 layout，也可生成 synthetic smoke 权重 |
+| `scripts/ppti_export_tinybert_inputs.py` | 导出 TinyBERT embedding 权重和 tokenized input file |
 | `docs/PPTI_WORKFLOW.md` | 开发流程、测试命令、后续路线 |
 | `StudyNote/PPTI-Demo.md` | 本实验说明文档 |
 | `StudyNote/PPTI-TaskFlow.md` | 后续任务流程表，按阶段记录目标、输入输出、命令和验收标准 |
@@ -322,6 +323,15 @@ layout=ppti_tinybert_v1
 ```text
 params=4568736
 expected=4568736
+```
+
+同时已经导出真实 TinyBERT embedding 和一个 seq=16 的 tokenizer 输入样本：
+
+```text
+models/ppti/tinybert_embeddings_ppti.bin
+models/ppti/sample_input_seq16.bin
+embedding_params=9683856
+embedding_shape=vocab:30522 max_position:512 type_vocab:2 hidden:312
 ```
 
 当前代码支持通过 `MACRO_FLAGS` 切换形状。例如真实 TinyBERT-like 形状可尝试：

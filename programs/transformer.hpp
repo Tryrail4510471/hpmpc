@@ -76,6 +76,31 @@ struct ModelWeights
     std::size_t cursor = 0;
 };
 
+struct InputIds
+{
+    bool loaded = false;
+    bool attempted = false;
+    std::vector<int> token_ids;
+    std::vector<int> token_type_ids;
+    std::vector<int> position_ids;
+    std::vector<int> attention_mask;
+};
+
+struct EmbeddingWeights
+{
+    bool loaded = false;
+    bool attempted = false;
+    int vocab_size = 0;
+    int max_position = 0;
+    int type_vocab_size = 0;
+    int hidden = 0;
+    std::vector<float> word_embeddings;
+    std::vector<float> position_embeddings;
+    std::vector<float> token_type_embeddings;
+    std::vector<float> layer_norm_gamma;
+    std::vector<float> layer_norm_beta;
+};
+
 inline UINT_TYPE fixed(float value, int frac_bits = FRACTIONAL)
 {
     return FloatFixedConverter<FLOATTYPE, INT_TYPE, UINT_TYPE, FRACTIONAL>::float_to_ufixed(value, frac_bits);
@@ -110,6 +135,14 @@ inline std::string model_file_path()
         return file;
 
     return std::string(model_dir) + "/" + file;
+}
+
+inline std::string env_file_path(const char* env_name)
+{
+    const char* value = std::getenv(env_name);
+    if (value == nullptr)
+        return "";
+    return std::string(value);
 }
 
 inline ModelWeights& model_weights()
@@ -158,15 +191,155 @@ inline void reset_weight_cursor()
     model_weights().cursor = 0;
 }
 
+inline InputIds& input_ids()
+{
+    static InputIds input;
+    if (input.attempted)
+        return input;
+
+    input.attempted = true;
+    const std::string path = env_file_path("PPTI_INPUT_FILE");
+    if (path.empty())
+        return input;
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+        return input;
+
+    int seq_len = 0;
+    in.read(reinterpret_cast<char*>(&seq_len), sizeof(int));
+    if (seq_len != SEQ_LEN)
+        return input;
+
+    input.token_ids.resize(SEQ_LEN);
+    input.token_type_ids.resize(SEQ_LEN);
+    input.position_ids.resize(SEQ_LEN);
+    input.attention_mask.resize(SEQ_LEN);
+    in.read(reinterpret_cast<char*>(input.token_ids.data()), sizeof(int) * SEQ_LEN);
+    in.read(reinterpret_cast<char*>(input.token_type_ids.data()), sizeof(int) * SEQ_LEN);
+    in.read(reinterpret_cast<char*>(input.position_ids.data()), sizeof(int) * SEQ_LEN);
+    in.read(reinterpret_cast<char*>(input.attention_mask.data()), sizeof(int) * SEQ_LEN);
+    input.loaded = static_cast<bool>(in);
+    if (!input.loaded)
+    {
+        input.token_ids.clear();
+        input.token_type_ids.clear();
+        input.position_ids.clear();
+        input.attention_mask.clear();
+    }
+    return input;
+}
+
+inline EmbeddingWeights& embedding_weights()
+{
+    static EmbeddingWeights embeddings;
+    if (embeddings.attempted)
+        return embeddings;
+
+    embeddings.attempted = true;
+    const std::string path = env_file_path("PPTI_EMBEDDING_FILE");
+    if (path.empty())
+        return embeddings;
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+        return embeddings;
+
+    int total_params = 0;
+    in.read(reinterpret_cast<char*>(&total_params), sizeof(int));
+    in.read(reinterpret_cast<char*>(&embeddings.vocab_size), sizeof(int));
+    in.read(reinterpret_cast<char*>(&embeddings.max_position), sizeof(int));
+    in.read(reinterpret_cast<char*>(&embeddings.type_vocab_size), sizeof(int));
+    in.read(reinterpret_cast<char*>(&embeddings.hidden), sizeof(int));
+    if (embeddings.hidden != HIDDEN || embeddings.vocab_size <= 0 || embeddings.max_position < SEQ_LEN ||
+        embeddings.type_vocab_size <= 0)
+        return embeddings;
+
+    const int expected_params = embeddings.vocab_size * HIDDEN + embeddings.max_position * HIDDEN +
+                                embeddings.type_vocab_size * HIDDEN + 2 * HIDDEN;
+    if (total_params != expected_params)
+        return embeddings;
+
+    embeddings.word_embeddings.resize(embeddings.vocab_size * HIDDEN);
+    embeddings.position_embeddings.resize(embeddings.max_position * HIDDEN);
+    embeddings.token_type_embeddings.resize(embeddings.type_vocab_size * HIDDEN);
+    embeddings.layer_norm_gamma.resize(HIDDEN);
+    embeddings.layer_norm_beta.resize(HIDDEN);
+    in.read(reinterpret_cast<char*>(embeddings.word_embeddings.data()), sizeof(float) * embeddings.word_embeddings.size());
+    in.read(reinterpret_cast<char*>(embeddings.position_embeddings.data()), sizeof(float) * embeddings.position_embeddings.size());
+    in.read(reinterpret_cast<char*>(embeddings.token_type_embeddings.data()), sizeof(float) * embeddings.token_type_embeddings.size());
+    in.read(reinterpret_cast<char*>(embeddings.layer_norm_gamma.data()), sizeof(float) * HIDDEN);
+    in.read(reinterpret_cast<char*>(embeddings.layer_norm_beta.data()), sizeof(float) * HIDDEN);
+    embeddings.loaded = static_cast<bool>(in);
+    if (!embeddings.loaded)
+    {
+        embeddings.word_embeddings.clear();
+        embeddings.position_embeddings.clear();
+        embeddings.token_type_embeddings.clear();
+        embeddings.layer_norm_gamma.clear();
+        embeddings.layer_norm_beta.clear();
+    }
+    return embeddings;
+}
+
+inline bool build_embedding_inputs(std::vector<float>& values)
+{
+    InputIds& input = input_ids();
+    EmbeddingWeights& embeddings = embedding_weights();
+    if (!input.loaded || !embeddings.loaded)
+        return false;
+
+    values.assign(SEQ_LEN * HIDDEN, 0.0f);
+    for (int r = 0; r < SEQ_LEN; r++)
+    {
+        int token_id = input.token_ids[r];
+        int token_type_id = input.token_type_ids[r];
+        int position_id = input.position_ids[r];
+        if (token_id < 0 || token_id >= embeddings.vocab_size || token_type_id < 0 ||
+            token_type_id >= embeddings.type_vocab_size || position_id < 0 || position_id >= embeddings.max_position)
+            return false;
+
+        float mean = 0.0f;
+        for (int c = 0; c < HIDDEN; c++)
+        {
+            float value = embeddings.word_embeddings[token_id * HIDDEN + c] +
+                          embeddings.position_embeddings[position_id * HIDDEN + c] +
+                          embeddings.token_type_embeddings[token_type_id * HIDDEN + c];
+            values[r * HIDDEN + c] = value;
+            mean += value;
+        }
+        mean /= static_cast<float>(HIDDEN);
+
+        float variance = 0.0f;
+        for (int c = 0; c < HIDDEN; c++)
+        {
+            float centered = values[r * HIDDEN + c] - mean;
+            variance += centered * centered;
+        }
+        variance = variance / static_cast<float>(HIDDEN) + 0.001f;
+        float inv_std = 1.0f / std::sqrt(variance);
+
+        for (int c = 0; c < HIDDEN; c++)
+        {
+            float centered = values[r * HIDDEN + c] - mean;
+            values[r * HIDDEN + c] = centered * inv_std * embeddings.layer_norm_gamma[c] + embeddings.layer_norm_beta[c];
+        }
+    }
+    return true;
+}
+
 template <typename A>
 void load_inputs(std::vector<A>& x)
 {
+    std::vector<float> embedding_values;
+    const bool from_embedding_files = build_embedding_inputs(embedding_values);
     for (int i = 0; i < static_cast<int>(x.size()); i++)
     {
+        UINT_TYPE value = fixed(from_embedding_files ? embedding_values[i] : input_value(i));
 #if DATAOWNER == -1
-        x[i] = A(fixed(input_value(i)));
+        x[i] = A(value);
 #else
-        x[i].template prepare_receive_and_replicate<DATAOWNER>(fixed(input_value(i)));
+        x[i].template prepare_receive_and_replicate<DATAOWNER>(value);
 #endif
     }
 #if DATAOWNER != -1
@@ -654,9 +827,28 @@ void transformer_inference(DATATYPE* res)
     {
         print_online("PPTI TinyBERT: using deterministic dummy weights.");
     }
+    if (embedding_weights().loaded)
+    {
+        print_online("PPTI TinyBERT: loaded embedding weights from file.");
+    }
+    else
+    {
+        print_online("PPTI TinyBERT: using deterministic dummy embeddings.");
+    }
+    if (input_ids().loaded)
+    {
+        print_online("PPTI TinyBERT: loaded input ids from file.");
+    }
+    else
+    {
+        print_online("PPTI TinyBERT: using deterministic dummy input ids.");
+    }
     if (std::getenv("PPTI_VALIDATE_MODEL_ONLY") != nullptr)
     {
-        res[0] = model_weights().loaded ? 1 : 0;
+        bool model_ok = model_weights().loaded || env_file_path("PPTI_MODEL_FILE").empty();
+        bool embeddings_ok = embedding_weights().loaded || env_file_path("PPTI_EMBEDDING_FILE").empty();
+        bool input_ok = input_ids().loaded || env_file_path("PPTI_INPUT_FILE").empty();
+        res[0] = (model_ok && embeddings_ok && input_ok) ? 1 : 0;
         print_online("PPTI TinyBERT: model-file validation only.");
         return;
     }

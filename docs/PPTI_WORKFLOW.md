@@ -52,6 +52,18 @@ python3 scripts/ppti_export_tinybert.py --synthetic --output models/ppti/tinyber
 PPTI_MODEL_FILE=models/ppti/tinybert_ppti_synthetic.bin scripts/run.sh -p all -n 3
 ```
 
+Synthetic embedding/input smoke test:
+
+```sh
+python3 scripts/ppti_export_tinybert_inputs.py --synthetic --seq-len 4 \
+  --embedding-output models/ppti/tinybert_embeddings_synthetic.bin \
+  --input-output models/ppti/sample_input_seq4.bin
+
+PPTI_EMBEDDING_FILE=models/ppti/tinybert_embeddings_synthetic.bin \
+PPTI_INPUT_FILE=models/ppti/sample_input_seq4.bin \
+scripts/run.sh -p all -n 3
+```
+
 HuggingFace TinyBERT export, after installing `torch` and `transformers`:
 
 ```sh
@@ -73,6 +85,15 @@ Real model-file header check:
 ```text
 params=4568736
 expected=4568736
+```
+
+Verified real embedding/input export:
+
+```text
+embedding_params=9683856
+input_seq_len=16
+embedding_shape=vocab:30522 max_position:512 type_vocab:2 hidden:312
+layout=ppti_tinybert_embedding_v1
 ```
 
 Real TinyBERT shape experiments can be selected at compile time after the
@@ -110,8 +131,7 @@ distribution, not only last-layer argmax behavior.
 
 The detailed execution checklist lives in `StudyNote/PPTI-TaskFlow.md`.
 
-1. Add embedding and input-file paths for token ids, token type ids, position ids,
-   and attention mask.
+1. Add attention mask support before Softmax.
 2. Add fixed-point trace comparison between `programs/transformer.hpp` and
    `scripts/ppti_reference.py`.
 3. Run real TinyBERT weights with a small real sequence length such as 16.
@@ -119,6 +139,6 @@ The detailed execution checklist lives in `StudyNote/PPTI-TaskFlow.md`.
    approximation or lookup/range-reduction design.
 5. Replace the cubic GELU surrogate with a calibrated approximation and measure
    task accuracy.
-6. Add attention mask support before Softmax.
+6. Calibrate fixed-point precision and truncation.
 7. Scale constants from smoke dimensions to TinyBERT dimensions, then benchmark
    CPU and CUDA paths separately.

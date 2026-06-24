@@ -19,6 +19,7 @@ branch: master
 - `prepare_GEMM` CPU 路径已跑通。
 - CUDA GEMM 可编译，但 tiny GEMM 下 CUTLASS 会打印 internal error，暂不作为性能结论。
 - `scripts/ppti_export_tinybert.py` 可导出 HuggingFace TinyBERT encoder 权重。
+- `scripts/ppti_export_tinybert_inputs.py` 可导出 embedding 权重和 input id 文件。
 - 真实 TinyBERT encoder 权重已导出：
 
 ```text
@@ -32,8 +33,8 @@ ffn_hidden=1200
 
 当前缺口：
 
-- token ids 到 input embedding 的路径尚未接入。
-- attention mask 尚未接入。
+- token ids 到 input embedding 的路径已接入，attention mask 已进入 input file layout。
+- attention mask 尚未接入 Softmax 计算。
 - 真实 TinyBERT 完整安全推理尚未运行。
 - 尚未做 C++ fixed-point trace 与 PyTorch 明文逐层对齐。
 - Softmax/GELU 仍是 smoke 级近似。
@@ -145,6 +146,7 @@ input file:
   int32 seq_len
   int32 token_ids[seq_len]
   int32 token_type_ids[seq_len]
+  int32 position_ids[seq_len]
   int32 attention_mask[seq_len]
 
 embedding file:
@@ -164,6 +166,56 @@ synthetic input embedding smoke test 跑通
 Python reference 能打印 embedding output
 C++ validate mode 能确认 embedding 文件参数数量
 ```
+
+已完成状态：完成。
+
+实际新增文件：
+
+```text
+scripts/ppti_export_tinybert_inputs.py
+programs/transformer.hpp
+```
+
+实际导出命令：
+
+```sh
+cd /home/user/hpmpc
+python3 scripts/ppti_export_tinybert_inputs.py \
+  --model huawei-noah/TinyBERT_General_4L_312D \
+  --seq-len 16 \
+  --text "privacy preserving transformer inference" \
+  --embedding-output models/ppti/tinybert_embeddings_ppti.bin \
+  --input-output models/ppti/sample_input_seq16.bin
+```
+
+实际导出结果：
+
+```text
+embedding_file=models/ppti/tinybert_embeddings_ppti.bin
+embedding_params=9683856
+input_file=models/ppti/sample_input_seq16.bin
+input_seq_len=16
+embedding_shape=vocab:30522 max_position:512 type_vocab:2 hidden:312
+layout=ppti_tinybert_embedding_v1
+```
+
+真实 shape validation-only 命令：
+
+```sh
+make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRACTIONAL=14 USE_CUDA_GEMM=0 \
+  MACRO_FLAGS="-DPPTI_SEQ_LEN=16 -DPPTI_HIDDEN=312 -DPPTI_NUM_HEADS=12 -DPPTI_NUM_LAYERS=4 -DPPTI_FFN_HIDDEN=1200"
+
+PPTI_VALIDATE_MODEL_ONLY=1 \
+PPTI_MODEL_FILE=models/ppti/tinybert_4l_312d_ppti.bin \
+PPTI_EMBEDDING_FILE=models/ppti/tinybert_embeddings_ppti.bin \
+PPTI_INPUT_FILE=models/ppti/sample_input_seq16.bin \
+scripts/run.sh -p all -n 3
+```
+
+说明：
+
+- C++ 端当前会读取 `PPTI_EMBEDDING_FILE` 和 `PPTI_INPUT_FILE`，计算 `word + position + token_type` embedding，并执行 embedding LayerNorm。
+- `attention_mask` 已经写入 input file，但尚未用于 attention Softmax，下一阶段实现。
 
 ## 阶段 3：Attention Mask
 
@@ -351,14 +403,14 @@ git push origin master
 下一步直接进入阶段 2：
 
 ```text
-实现 embedding 权重导出和 input file layout。
+实现 attention mask 接入 Softmax。
 ```
 
 最小可交付结果：
 
 ```text
-scripts/ppti_export_tinybert_inputs.py
-PPTI_INPUT_FILE 读取路径
-embedding synthetic smoke test
-StudyNote/PPTI-TaskFlow.md 更新阶段 2 完成状态
+scores_h[row, col] += mask[col]
+无 padding 时输出保持一致
+有 padding 时 masked position 概率接近 0
+StudyNote/PPTI-TaskFlow.md 更新阶段 3 完成状态
 ```
