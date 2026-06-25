@@ -144,6 +144,22 @@ P0 online getTime  ~= 6.36s
 Interpretation: the Softmax probability explosion is fixed for the current
 correctness baseline. The next major divergence is after Softmax.
 
+Stage 8 added post-Softmax trace points and localized the next instability:
+
+```text
+layer0_attn_residual_post_ln_stats max=0.0294043 mean=0.0170682947
+layer0_ffn_hidden_linear_stats     max=0.1601343 mean=0.0822365767
+layer0_ffn_hidden_gelu_stats       max=252.882   mean=120.04788
+layer0_ffn_out_stats               max=5231.235  mean=2029.3894
+layer0_ffn_residual_post_ln_stats  max=5.62848948e14 mean=4.6544643e14
+```
+
+Interpretation: C++ and Python fixed-point traces stay close through attention
+output and attention LayerNorm. The next numerical problem is the cubic GELU
+surrogate: real TinyBERT FFN pre-activations reach roughly `[-63, 58]`, where
+the cubic term grows to `~3e4`. That pushes FFN output to `~9e5`, after which
+LayerNorm reciprocal sqrt becomes unstable.
+
 Synthetic model-file smoke test:
 
 ```sh
@@ -234,12 +250,11 @@ The detailed execution checklist lives in `StudyNote/PPTI-TaskFlow.md`.
 
 1. Add a Python fixed-point reference so trace error can separate quantization
    from protocol/approximation error.
-2. Trace the post-Softmax path: context matmul, output projection, residual and
-   LayerNorm.
-3. Replace the rational Softmax baseline with a lower-round lookup or
+2. Replace the cubic GELU surrogate with a calibrated approximation that does
+   not explode for real TinyBERT FFN pre-activations.
+3. Calibrate LayerNorm reciprocal sqrt for the post-FFN value range.
+4. Replace the rational Softmax baseline with a lower-round lookup or
    range-reduction design.
-4. Replace the cubic GELU surrogate with a calibrated approximation and measure
-   task accuracy.
 5. Calibrate fixed-point precision and truncation.
 6. Scale constants from smoke dimensions to TinyBERT dimensions, then benchmark
    CPU and CUDA paths separately.

@@ -365,16 +365,16 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 3. GELU 使用 cubic surrogate，尚未校准。
 4. LayerNorm 使用 Newton reciprocal sqrt，但初值和迭代次数仍需针对真实数值范围调优。
 5. C++ fixed-point reveal trace 与 Python reference 已建立第一轮对齐，当前正确性 baseline 使用逐元素 dot-product 矩阵乘。
-6. 原 `prepare_GEMM` 大矩阵路径需要单独缩小复现；当前端到端第一处明显发散已转移到 Softmax 后路径。
+6. 原 `prepare_GEMM` 大矩阵路径需要单独缩小复现；阶段 8 已确认当前端到端第一处主要数值问题在 FFN 的 cubic GELU surrogate。
 
 ## 9. 下一步开发计划
 
 推荐下一步顺序：
 
-1. 对 Softmax 后路径增加 trace：context matmul、output projection、residual、LayerNorm。
-2. 单独构造 `prepare_GEMM` 大矩阵复现用例，定位 TinyBERT projection 爆值原因。
-3. 将 Softmax rational baseline 替换为更低通信的 range reduction / lookup 方案。
-4. 校准 GELU 和 LayerNorm 近似。
+1. 替换 cubic GELU surrogate，避免真实 TinyBERT FFN pre-activation `[-63, 58]` 下三次项爆炸。
+2. 校准 post-FFN LayerNorm reciprocal sqrt。
+3. 单独构造 `prepare_GEMM` 大矩阵复现用例，定位 TinyBERT projection 爆值原因。
+4. 将 Softmax rational baseline 替换为更低通信的 range reduction / lookup 方案。
 5. 在 `seq=16` 误差收敛后再扩大到 `seq=32/64/128`。
 
 ## 10. 当前阶段结论
@@ -385,6 +385,7 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 
 - Transformer 的核心矩阵乘接口已经接入 HPMPC；当前正确性 baseline 先使用逐元素 dot-product，`prepare_GEMM` 大投影路径需继续定位。
 - Attention Softmax 的插入位置和调用链已经明确。
+- Softmax 后路径 trace 已完成，当前主要数值风险已定位到 FFN/GELU 与后续 LayerNorm。
 - LayerNorm、GELU、residual、FFN 可以在 HPMPC 算术分享层组合出来。
 - CPU 和 CUDA GEMM backend 均可运行。
 - 后续工作可以集中在 Softmax、GELU、LayerNorm 近似优化，以及 `prepare_GEMM` 大矩阵路径修复上。

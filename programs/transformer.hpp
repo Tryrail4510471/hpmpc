@@ -915,11 +915,22 @@ void secure_multi_head_attention(std::vector<A>& x,
         if (layer == 0 && head == 0)
             trace_matrix("layer0_head0_probs", scores, SEQ_LEN, SEQ_LEN);
         secure_matmul(scores, vh, context, SEQ_LEN, SEQ_LEN, HEAD_DIM);
+        if (layer == 0 && head == 0)
+            trace_stats("layer0_head0_context_stats", context);
         place_head(context, concat_context, head);
     }
 
+    if (layer == 0)
+    {
+        trace_stats("layer0_concat_context_stats", concat_context);
+        trace_stats("layer0_wo_stats", wo);
+    }
     secure_matmul(concat_context, wo, out, SEQ_LEN, HIDDEN, HIDDEN);
+    if (layer == 0)
+        trace_stats("layer0_attn_out_linear_stats", out);
     add_bias(out, bo, SEQ_LEN, HIDDEN);
+    if (layer == 0)
+        trace_stats("layer0_attn_out_stats", out);
 }
 
 template <typename A>
@@ -951,18 +962,32 @@ void secure_tinybert_encoder_layer(std::vector<A>& hidden, int layer)
     secure_multi_head_attention(hidden, wq, wk, wv, wo, bq, bk, bv, bo, layer, attn_out);
     for (int i = 0; i < static_cast<int>(hidden.size()); i++)
         attn_residual[i] = hidden[i] + attn_out[i];
+    if (layer == 0)
+        trace_stats("layer0_attn_residual_pre_ln_stats", attn_residual);
     secure_rowwise_layer_norm(attn_residual, attn_gamma, attn_beta, SEQ_LEN, HIDDEN);
+    if (layer == 0)
+        trace_stats("layer0_attn_residual_post_ln_stats", attn_residual);
 
     std::vector<A> ffn_hidden(SEQ_LEN * FFN_HIDDEN), ffn_out(SEQ_LEN * HIDDEN);
     secure_matmul(attn_residual, w1, ffn_hidden, SEQ_LEN, HIDDEN, FFN_HIDDEN);
+    if (layer == 0)
+        trace_stats("layer0_ffn_hidden_linear_stats", ffn_hidden);
     add_bias(ffn_hidden, b1, SEQ_LEN, FFN_HIDDEN);
     secure_gelu_poly(ffn_hidden);
+    if (layer == 0)
+        trace_stats("layer0_ffn_hidden_gelu_stats", ffn_hidden);
     secure_matmul(ffn_hidden, w2, ffn_out, SEQ_LEN, FFN_HIDDEN, HIDDEN);
     add_bias(ffn_out, b2, SEQ_LEN, HIDDEN);
+    if (layer == 0)
+        trace_stats("layer0_ffn_out_stats", ffn_out);
 
     for (int i = 0; i < static_cast<int>(hidden.size()); i++)
         hidden[i] = attn_residual[i] + ffn_out[i];
+    if (layer == 0)
+        trace_stats("layer0_ffn_residual_pre_ln_stats", hidden);
     secure_rowwise_layer_norm(hidden, ffn_gamma, ffn_beta, SEQ_LEN, HIDDEN);
+    if (layer == 0)
+        trace_stats("layer0_ffn_residual_post_ln_stats", hidden);
 
     if (layer == 0)
         trace_matrix("layer0_out", hidden, SEQ_LEN, HIDDEN);

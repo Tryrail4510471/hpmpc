@@ -412,7 +412,8 @@ def multi_head_attention(
         raw_scores = matmul(qh, transpose(kh), cfg)
         scores = scale(raw_scores, 1.0 / math.sqrt(cfg.head_dim), cfg)
         probs = softmax_poly(scores, attention_mask, cfg)
-        contexts.append(matmul(probs, vh, cfg))
+        context = matmul(probs, vh, cfg)
+        contexts.append(context)
         if layer == 0 and head == 0:
             traces["layer0_head0_q_stats"] = matrix_stats(qh)
             traces["layer0_head0_k_stats"] = matrix_stats(kh)
@@ -421,8 +422,19 @@ def multi_head_attention(
             traces["layer0_head0_score_scaled_stats"] = matrix_stats(scores)
             traces["layer0_head0_scores"] = scores
             traces["layer0_head0_probs"] = probs
+            traces["layer0_head0_context_stats"] = matrix_stats(context)
 
-    return add_bias(matmul(concat_heads(contexts, cfg), wo, cfg), bo, cfg)
+    concat_context = concat_heads(contexts, cfg)
+    if layer == 0:
+        traces["layer0_concat_context_stats"] = matrix_stats(concat_context)
+        traces["layer0_wo_stats"] = matrix_stats(wo)
+    attn_out_linear = matmul(concat_context, wo, cfg)
+    if layer == 0:
+        traces["layer0_attn_out_linear_stats"] = matrix_stats(attn_out_linear)
+    attn_out = add_bias(attn_out_linear, bo, cfg)
+    if layer == 0:
+        traces["layer0_attn_out_stats"] = matrix_stats(attn_out)
+    return attn_out
 
 
 def encoder_layer(
@@ -443,10 +455,27 @@ def encoder_layer(
     attn_gamma, attn_beta = load_layer_norm_params(reader, base + 6000, cfg)
     ffn_gamma, ffn_beta = load_layer_norm_params(reader, base + 7000, cfg)
 
-    attn_residual = layer_norm(add(hidden, attn_out, cfg), attn_gamma, attn_beta, cfg)
-    ffn_hidden = gelu_poly(add_bias(matmul(attn_residual, w1, cfg), b1, cfg), cfg)
+    attn_residual_pre_ln = add(hidden, attn_out, cfg)
+    if layer == 0:
+        traces["layer0_attn_residual_pre_ln_stats"] = matrix_stats(attn_residual_pre_ln)
+    attn_residual = layer_norm(attn_residual_pre_ln, attn_gamma, attn_beta, cfg)
+    if layer == 0:
+        traces["layer0_attn_residual_post_ln_stats"] = matrix_stats(attn_residual)
+    ffn_hidden_linear = matmul(attn_residual, w1, cfg)
+    if layer == 0:
+        traces["layer0_ffn_hidden_linear_stats"] = matrix_stats(ffn_hidden_linear)
+    ffn_hidden = gelu_poly(add_bias(ffn_hidden_linear, b1, cfg), cfg)
+    if layer == 0:
+        traces["layer0_ffn_hidden_gelu_stats"] = matrix_stats(ffn_hidden)
     ffn_out = add_bias(matmul(ffn_hidden, w2, cfg), b2, cfg)
-    out = layer_norm(add(attn_residual, ffn_out, cfg), ffn_gamma, ffn_beta, cfg)
+    if layer == 0:
+        traces["layer0_ffn_out_stats"] = matrix_stats(ffn_out)
+    ffn_residual_pre_ln = add(attn_residual, ffn_out, cfg)
+    if layer == 0:
+        traces["layer0_ffn_residual_pre_ln_stats"] = matrix_stats(ffn_residual_pre_ln)
+    out = layer_norm(ffn_residual_pre_ln, ffn_gamma, ffn_beta, cfg)
+    if layer == 0:
+        traces["layer0_ffn_residual_post_ln_stats"] = matrix_stats(out)
     traces[f"layer{layer}_out"] = out
     return out
 
@@ -533,6 +562,18 @@ def main() -> None:
             "layer0_head0_score_scaled_stats",
             "layer0_head0_scores",
             "layer0_head0_probs",
+            "layer0_head0_context_stats",
+            "layer0_concat_context_stats",
+            "layer0_wo_stats",
+            "layer0_attn_out_linear_stats",
+            "layer0_attn_out_stats",
+            "layer0_attn_residual_pre_ln_stats",
+            "layer0_attn_residual_post_ln_stats",
+            "layer0_ffn_hidden_linear_stats",
+            "layer0_ffn_hidden_gelu_stats",
+            "layer0_ffn_out_stats",
+            "layer0_ffn_residual_pre_ln_stats",
+            "layer0_ffn_residual_post_ln_stats",
             "layer0_out",
             "layer1_out",
             "layer2_out",

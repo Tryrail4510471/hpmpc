@@ -698,7 +698,87 @@ smoke trace 误差下降
 通信和时间可接受
 ```
 
-## 阶段 7：性能评估
+## 阶段 8：Softmax 后路径对齐
+
+目标：阶段 7 已把 `layer0_head0_probs` 的误差从 `~5.44e14` 降到 `max ~= 0.0063`，但 `layer0_out/final_output` 仍然存在巨大差异。阶段 8 的任务是沿 Softmax 之后的链路定位新的首个主要发散点。
+
+新增 trace 点：
+
+```text
+layer0_head0_context_stats
+layer0_concat_context_stats
+layer0_wo_stats
+layer0_attn_out_linear_stats
+layer0_attn_out_stats
+layer0_attn_residual_pre_ln_stats
+layer0_attn_residual_post_ln_stats
+layer0_ffn_hidden_linear_stats
+layer0_ffn_hidden_gelu_stats
+layer0_ffn_out_stats
+layer0_ffn_residual_pre_ln_stats
+layer0_ffn_residual_post_ln_stats
+```
+
+排查顺序：
+
+```text
+probs * V
+concat heads
+attention output projection
+attention residual
+attention LayerNorm
+FFN first projection
+GELU
+FFN second projection
+FFN residual
+final LayerNorm
+```
+
+验收标准：
+
+```text
+找出 layer0_out 巨大误差最早出现的 trace 点
+确认该点是协议实现问题、fixed-point 近似问题，还是 Python/C++ reference 不一致
+```
+
+阶段 8 实测结果：
+
+```text
+real seq=16 C++ vs Python fixed reference:
+layer0_head0_probs                  max=0.006285352 mean=0.000163028266
+layer0_head0_context_stats          max=0.01053516  mean=0.00730345433
+layer0_concat_context_stats         max=0.01160742  mean=0.004390771
+layer0_attn_out_linear_stats        max=0.02069727  mean=0.01238228
+layer0_attn_out_stats               max=0.02223926  mean=0.0131482977
+layer0_attn_residual_pre_ln_stats   max=0.06151611  mean=0.0248404243
+layer0_attn_residual_post_ln_stats  max=0.0294043   mean=0.0170682947
+layer0_ffn_hidden_linear_stats      max=0.1601343   mean=0.0822365767
+layer0_ffn_hidden_gelu_stats        max=252.882     mean=120.04788
+layer0_ffn_out_stats                max=5231.235    mean=2029.3894
+layer0_ffn_residual_post_ln_stats   max=5.62848948e14 mean=4.6544643e14
+P0 online getTime                   ~= 6.48s
+```
+
+原始统计：
+
+```text
+reference layer0_ffn_hidden_linear_stats: min=-62.9501343 max=58.3748779 mean_abs=1.50869753
+reference layer0_ffn_hidden_gelu_stats:   min=-34082.882 max=24906.9573 mean_abs=45.054341
+reference layer0_ffn_out_stats:           min=-660431.235 max=920442.444 mean_abs=2128.48919
+
+C++ layer0_ffn_hidden_linear_stats:       min=-62.79 max=58.29 mean_abs=1.507
+C++ layer0_ffn_hidden_gelu_stats:         min=-3.383e4 max=2.48e4 mean_abs=44.75
+C++ layer0_ffn_out_stats:                 min=-6.552e5 max=9.196e5 mean_abs=2114
+```
+
+阶段判断：
+
+- Softmax 后到 attention residual/attention LayerNorm 的 C++ 与 Python fixed reference 仍保持小误差。
+- 新的主要数值问题不是协议实现不一致，而是当前 cubic GELU surrogate 在真实 TinyBERT FFN pre-activation 范围 `[-63, 58]` 下严重放大数值。
+- FFN output 被放大到 `~9e5` 后，后续 LayerNorm reciprocal sqrt 也失稳，最终表现为 `layer0_out/final_output` 的 `1e14` 级异常。
+- 下一阶段应优先替换 GELU approximation，再校准 LayerNorm reciprocal sqrt。
+
+## 阶段 9：性能评估
 
 目标：得到 CPU/CUDA、不同 seq_len、不同近似方案下的效率数据。
 
@@ -748,16 +828,16 @@ git push origin master
 
 ## 下一步执行建议
 
-下一步进入阶段 6：
+下一步进入阶段 8：
 
 ```text
-建立 fixed-point Python reference，并开始校准 Softmax/GELU/LayerNorm 近似。
+Softmax 后路径对齐，定位 layer0_out 巨大误差来源。
 ```
 
 最小可交付结果：
 
 ```text
-fixed-point reference 可以复现 layer0_head0_scores 误差方向
-Softmax/GELU 近似替换前后有 trace 误差对比
-StudyNote/PPTI-TaskFlow.md 更新阶段 6 状态
+真实 seq=16 下输出新增 post-Softmax trace 比较
+明确首个发散点：context / output projection / LayerNorm / FFN
+StudyNote/PPTI-TaskFlow.md 更新阶段 8 状态
 ```
