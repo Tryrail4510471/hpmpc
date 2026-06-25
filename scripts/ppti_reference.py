@@ -317,14 +317,17 @@ def reciprocal_sqrt_newton(values: list[float], iterations: int, initial_guess: 
 def softmax_poly(scores: Matrix, attention_mask: list[int], cfg: Config) -> Matrix:
     out: Matrix = []
     for row in scores:
-        row_max = max(row)
-        shifted = [q_sub(x, row_max, cfg) for x in row]
+        masked_row = [x if attention_mask[i] != 0 else q(-1024.0, cfg) for i, x in enumerate(row)]
+        row_max = max(masked_row)
+        shifted = [q_sub(x, row_max, cfg) for x in masked_row]
+        shifted = [x if attention_mask[i] != 0 else q(0.0, cfg) for i, x in enumerate(shifted)]
         squared = [q_mul(x, x, cfg) for x in shifted]
         squared = [q_mul(x, 0.5, cfg) for x in squared]
-        exp_approx = [q_add(q_add(q(1.0, cfg), x, cfg), sq, cfg) for x, sq in zip(shifted, squared)]
+        exp_denom = [q_add(q_sub(q(1.0, cfg), x, cfg), sq, cfg) for x, sq in zip(shifted, squared)]
+        exp_approx = reciprocal_newton(exp_denom, 12, 1.0 / 1024.0, cfg)
         exp_approx = [q_mul(x, 1.0 if attention_mask[i] != 0 else 0.0, cfg) for i, x in enumerate(exp_approx)]
         denom = q_sum(exp_approx, cfg)
-        inv_sum = reciprocal_newton([denom], 3, 1.0 / len(row), cfg)[0]
+        inv_sum = reciprocal_newton([denom], 8, 1.0 / len(row), cfg)[0]
         out.append([q_mul(x, inv_sum, cfg) for x in exp_approx])
     return out
 

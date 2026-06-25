@@ -762,12 +762,26 @@ void secure_rowwise_layer_norm(std::vector<A>& values, const std::vector<A>& gam
 template <typename A>
 void secure_rowwise_softmax_poly(std::vector<A>& scores, int rows, int cols, const std::vector<int>& attention_mask)
 {
+    for (int r = 0; r < rows; r++)
+    {
+        for (int c = 0; c < cols; c++)
+        {
+            if (c >= static_cast<int>(attention_mask.size()) || attention_mask[c] == 0)
+                scores[r * cols + c] = A(fixed(-1024.0f));
+        }
+    }
+
     std::vector<A> row_max(rows);
     max_min_sint<0, BITLENGTH>(scores.data(), cols, row_max.data(), rows, true);
 
     for (int r = 0; r < rows; r++)
         for (int c = 0; c < cols; c++)
             scores[r * cols + c] = scores[r * cols + c] - row_max[r];
+
+    for (int r = 0; r < rows; r++)
+        for (int c = 0; c < cols; c++)
+            if (c >= static_cast<int>(attention_mask.size()) || attention_mask[c] == 0)
+                scores[r * cols + c] = A(0);
 
     std::vector<A> squared(scores.size());
     for (int i = 0; i < static_cast<int>(scores.size()); i++)
@@ -786,9 +800,14 @@ void secure_rowwise_softmax_poly(std::vector<A>& scores, int rows, int cols, con
     for (auto& value : squared)
         value.complete_public_mult_fixed();
 
-    // Current exp approximation: exp(x) ~= 1 + x + 0.5*x^2 after row-max stabilization.
+    // Rational exp approximation for x <= 0 after row-max stabilization:
+    // exp(x) ~= 1 / (1 - x + 0.5*x^2). Unlike the quadratic Taylor form, this
+    // keeps tokens far below the row max small instead of making them large.
+    std::vector<A> exp_denom(scores.size());
     for (int i = 0; i < static_cast<int>(scores.size()); i++)
-        scores[i] = A(fixed(1.0f)) + scores[i] + squared[i];
+        exp_denom[i] = A(fixed(1.0f)) - scores[i] + squared[i];
+
+    reciprocal_newton(exp_denom, scores, 12, 1.0f / 1024.0f);
 
     for (int r = 0; r < rows; r++)
     {
@@ -809,7 +828,7 @@ void secure_rowwise_softmax_poly(std::vector<A>& scores, int rows, int cols, con
             row_sum[r] += scores[r * cols + c];
 
     std::vector<A> inv_sum;
-    reciprocal_newton(row_sum, inv_sum, 3, 1.0f / static_cast<float>(cols));
+    reciprocal_newton(row_sum, inv_sum, 8, 1.0f / static_cast<float>(cols));
 
     for (int r = 0; r < rows; r++)
     {

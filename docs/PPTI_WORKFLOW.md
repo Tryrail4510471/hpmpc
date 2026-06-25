@@ -14,8 +14,8 @@ existing HPMPC runtime as `FUNCTION_IDENTIFIER=87`.
   - secret/public dummy input and model parameter loading
   - per-layer Q/K/V projections through `prepare_GEMM`
   - per-head attention score GEMM and public scale by `1 / sqrt(head_dim)`
-  - row-wise stable Softmax slot using row max, polynomial exp, and secret
-    row-sum reciprocal
+  - row-wise stable Softmax slot using masked row max, rational exp, and
+    secret row-sum reciprocal
   - attention value GEMM, head concatenation, and output projection
   - residual plus LayerNorm with learned gamma/beta
   - FFN with a cubic GELU surrogate
@@ -124,6 +124,26 @@ layer0_out         max=5.62871964e14 mean=2.70765639e14
 final_output       max=3.41277026e14 mean=1.49881735e14
 ```
 
+Stage 7 replaced the quadratic Taylor exp with a rational baseline:
+
+```text
+exp(x) ~= 1 / (1 - x + 0.5*x^2), x <= 0
+```
+
+and fixed masked Softmax row-max handling by replacing masked scores with a
+public `-1024` before row-max stabilization. Real seq=16 trace comparison now
+shows:
+
+```text
+layer0_head0_probs max=0.006285352 mean=0.000163028266
+layer0_out         max=5.62882548e14 mean=2.70958401e14
+final_output       max=3.46676142e14 mean=1.52156787e14
+P0 online getTime  ~= 6.36s
+```
+
+Interpretation: the Softmax probability explosion is fixed for the current
+correctness baseline. The next major divergence is after Softmax.
+
 Synthetic model-file smoke test:
 
 ```sh
@@ -204,7 +224,9 @@ context = concat(context_0, ..., context_h) * WO
 The current implementation is `secure_rowwise_softmax_poly` in
 `programs/transformer.hpp`. It is separate from the PIGEON classification-head
 Softmax path because attention requires a real row-wise probability
-distribution, not only last-layer argmax behavior.
+distribution, not only last-layer argmax behavior. Stage 7 currently uses a
+rational exp baseline; it is intended for correctness debugging, not final
+performance.
 
 ## Next Milestones
 
@@ -212,10 +234,12 @@ The detailed execution checklist lives in `StudyNote/PPTI-TaskFlow.md`.
 
 1. Add a Python fixed-point reference so trace error can separate quantization
    from protocol/approximation error.
-2. Replace the quadratic exp approximation with a better MPC-friendly
-   approximation or lookup/range-reduction design.
-3. Replace the cubic GELU surrogate with a calibrated approximation and measure
+2. Trace the post-Softmax path: context matmul, output projection, residual and
+   LayerNorm.
+3. Replace the rational Softmax baseline with a lower-round lookup or
+   range-reduction design.
+4. Replace the cubic GELU surrogate with a calibrated approximation and measure
    task accuracy.
-4. Calibrate fixed-point precision and truncation.
-5. Scale constants from smoke dimensions to TinyBERT dimensions, then benchmark
+5. Calibrate fixed-point precision and truncation.
+6. Scale constants from smoke dimensions to TinyBERT dimensions, then benchmark
    CPU and CUDA paths separately.

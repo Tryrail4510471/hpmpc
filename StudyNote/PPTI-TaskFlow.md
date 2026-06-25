@@ -623,6 +623,65 @@ piecewise polynomial
 lookup-table with MPC-friendly selection
 ```
 
+### 7.1 Softmax rational exp baseline
+
+阶段 6 证明 projection 和 attention score 在逐元素 dot-product baseline 下已经对齐，新的首个发散点是 `layer0_head0_probs`。原实现使用：
+
+```text
+exp(x) ~= 1 + x + 0.5*x^2
+```
+
+这个二阶 Taylor 形式只适合 `x` 接近 0 的小范围。Attention score 做 row-max stabilization 后满足 `x <= 0`，当某个 token 远低于 row max 时，`x` 是较大的负数，二阶项会把近似值重新放大，导致低概率 token 获得巨大概率质量。
+
+当前替换为 rational baseline：
+
+```text
+exp(x) ~= 1 / (1 - x + 0.5*x^2), x <= 0
+```
+
+这个近似不是最终精度方案，但有两个工程优点：
+
+- 对 `x <= 0` 始终为正，不会因为平方项把远离 row max 的 token 放大。
+- 可以直接复用 HPMPC 的乘法和 Newton reciprocal 路径，适合作为 MPC-friendly baseline。
+
+C++ 与 Python fixed-point reference 同步修改：
+
+- `programs/transformer.hpp::secure_rowwise_softmax_poly`
+- `scripts/ppti_reference.py::softmax_poly`
+
+参数选择：
+
+```text
+exp reciprocal initial_guess = 1 / 1024
+exp reciprocal iterations    = 12
+row_sum reciprocal iterations = 8
+```
+
+最初尝试 `1/16384`，但在 `FRACTIONAL=14` 下它正好是 1 个 LSB，乘法截断会让 Newton reciprocal 卡住。根据真实 `seq=16` trace，`layer0_head0_score_scaled_stats` 范围约为 `[-10.8, 29.7]`，row-max 后 rational denominator 主要落在 `1..~830`，因此 `1/1024` 可以保持初始乘积在稳定区间内，同时避免 LSB 卡死。后续如果 score clamp/range reduction 做好，可以减少迭代次数以降低通信轮数。
+
+补充修正：row max 必须忽略公开 masked columns。否则如果 padding token 的 score 大于有效 token，row-max stabilization 会以 masked token 为中心，后续再把 masked exp 清零会导致有效 token 的概率和小于 1。当前做法是在 `row_max` 前把 masked score 替换为公开常数 `-1024`，row-max 后再把 masked shifted score 置 0，并在 exp 之后继续用 mask 清零概率质量。
+
+验证结果：
+
+```text
+smoke C++ vs Python fixed reference:
+layer0_head0_probs max=0.000332422 mean=0.00010446175
+final_output        max=0.001014941 mean=0.000319988893
+
+real seq=16 C++ vs Python fixed reference:
+layer0_head0_score_scaled_stats max=0.0389966 mean=0.0261987267
+layer0_head0_probs              max=0.006285352 mean=0.000163028266
+layer0_out                      max=5.62882548e14 mean=2.70958401e14
+final_output                    max=3.46676142e14 mean=1.52156787e14
+P0 online getTime               ~= 6.36s
+```
+
+阶段判断：
+
+- Softmax 爆值问题已经压住，`layer0_head0_probs` 从 `~5.44e14` 级误差下降到 `~6.3e-3`。
+- 新的首个主要发散已经后移到 Softmax 之后，即 attention context/output projection、LayerNorm 或后续 FFN 路径。
+- rational exp 每个 score 都要做 Newton reciprocal，目前是正确性 baseline，不是最终性能方案；后续应考虑 range reduction + piecewise/lookup 以减少通信轮数。
+
 GELU 候选：
 
 ```text

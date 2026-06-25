@@ -334,9 +334,15 @@ embedding_params=9683856
 embedding_shape=vocab:30522 max_position:512 type_vocab:2 hidden:312
 ```
 
-Attention mask 已接入 attention Softmax。当前实现没有直接加大负数 mask，而是在多项式 exp 近似之后、row sum 之前用公开 mask 清零 masked token 的概率质量；这是为了避免二阶 exp 近似在大负数处因平方项失真。
+Attention mask 已接入 attention Softmax。阶段 7 已把二阶 Taylor exp 替换为 rational baseline：
 
-阶段四已建立 C++ fixed-point trace 与 Python reference 的比较流程。smoke 结果显示 `embedding_out` 完全对齐，第一处误差从 `layer0_head0_scores` 开始，最终输出 `max_abs_error` 约为 `0.68885958`。真实 `seq=16` 统计 trace 进一步证明：embedding 与第一层 Q/K/V 权重加载正确，原 `prepare_GEMM` 路径在 TinyBERT 大投影形状下会把 `layer0_q_linear_stats` 放大到 `±5.6e14`；临时切换为逐元素 dot-product baseline 后，Q/K/V projection 与 QK score 已和 Python fixed-point reference 对齐，新的第一处明显发散后移到 attention Softmax。
+```text
+exp(x) ~= 1 / (1 - x + 0.5*x^2), x <= 0
+```
+
+同时修正了 masked row max：在求 row max 前把 masked score 替换为公开常数 `-1024`，避免 padding token 成为 row-max stabilization 的中心。
+
+阶段四已建立 C++ fixed-point trace 与 Python reference 的比较流程。smoke 结果显示 `embedding_out` 完全对齐，第一处误差从 `layer0_head0_scores` 开始，最终输出 `max_abs_error` 约为 `0.68885958`。真实 `seq=16` 统计 trace 进一步证明：embedding 与第一层 Q/K/V 权重加载正确，原 `prepare_GEMM` 路径在 TinyBERT 大投影形状下会把 `layer0_q_linear_stats` 放大到 `±5.6e14`；临时切换为逐元素 dot-product baseline 后，Q/K/V projection 与 QK score 已和 Python fixed-point reference 对齐。阶段 7 后，`layer0_head0_probs` 误差已从 `~5.44e14` 降到 `max=0.006285352, mean=0.000163028266`，新的主要发散点后移到 Softmax 之后。
 
 阶段五已完成真实 `seq=16` 小样本端到端 CPU/CUDA 推理。使用真实 TinyBERT encoder 权重、真实 embedding 权重和 tokenizer input，CPU online `getTime` 约 `6.30s`，通信量约 P0 发送 `7.099MB`、P1/P2 发送 `5.201MB`。机器重启后 `nvidia-smi` 正常，按 RTX 2060 的 `sm_75` 重编 CUTLASS 对象后，CUDA 复测无 CUTLASS error，online `getTime` 约 `6.40s`。
 
@@ -355,20 +361,21 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 当前版本是协议骨架，不是最终精度版本：
 
 1. 真实 TinyBERT encoder 权重、embedding 权重和 tokenizer input 路径已经接入。
-2. Attention mask 已接入，但 Softmax 使用二阶多项式 exp 近似，真实 score 范围下精度不足。
+2. Attention mask 已接入，Softmax rational baseline 已压住概率爆值；它仍是正确性 baseline，不是最终低通信实现。
 3. GELU 使用 cubic surrogate，尚未校准。
 4. LayerNorm 使用 Newton reciprocal sqrt，但初值和迭代次数仍需针对真实数值范围调优。
 5. C++ fixed-point reveal trace 与 Python reference 已建立第一轮对齐，当前正确性 baseline 使用逐元素 dot-product 矩阵乘。
-6. 原 `prepare_GEMM` 大矩阵路径需要单独缩小复现；当前端到端第一处明显发散已转移到 attention Softmax。
+6. 原 `prepare_GEMM` 大矩阵路径需要单独缩小复现；当前端到端第一处明显发散已转移到 Softmax 后路径。
 
 ## 9. 下一步开发计划
 
 推荐下一步顺序：
 
-1. 改进 attention Softmax 的 exp 近似、range reduction 和 reciprocal 初值。
+1. 对 Softmax 后路径增加 trace：context matmul、output projection、residual、LayerNorm。
 2. 单独构造 `prepare_GEMM` 大矩阵复现用例，定位 TinyBERT projection 爆值原因。
-3. 校准 GELU 和 LayerNorm 近似。
-4. 在 `seq=16` 误差收敛后再扩大到 `seq=32/64/128`。
+3. 将 Softmax rational baseline 替换为更低通信的 range reduction / lookup 方案。
+4. 校准 GELU 和 LayerNorm 近似。
+5. 在 `seq=16` 误差收敛后再扩大到 `seq=32/64/128`。
 
 ## 10. 当前阶段结论
 
