@@ -595,13 +595,34 @@ void scale_public(std::vector<A>& values, float scale)
 template <typename A>
 void secure_gelu_poly(std::vector<A>& values)
 {
+    std::vector<A> gate(values);
+    scale_public(gate, 0.3125f);
+    for (auto& value : gate)
+        value += A(fixed(0.5f));
+
     std::vector<A> candidates(values.size() * 2);
     for (int i = 0; i < static_cast<int>(values.size()); i++)
     {
-        candidates[2 * i] = values[i];
+        candidates[2 * i] = gate[i];
         candidates[2 * i + 1] = A(0);
     }
-    max_min_sint<0, BITLENGTH>(candidates.data(), 2, values.data(), values.size(), true);
+    max_min_sint<0, BITLENGTH>(candidates.data(), 2, gate.data(), values.size(), true);
+
+    for (int i = 0; i < static_cast<int>(values.size()); i++)
+    {
+        candidates[2 * i] = gate[i];
+        candidates[2 * i + 1] = A(fixed(1.0f));
+    }
+    max_min_sint<0, BITLENGTH>(candidates.data(), 2, gate.data(), values.size(), false);
+
+    for (int i = 0; i < static_cast<int>(values.size()); i++)
+    {
+        values[i] = values[i].prepare_dot(gate[i]);
+        values[i].mask_and_send_dot();
+    }
+    A::communicate();
+    for (auto& value : values)
+        value.complete_mult();
 }
 
 template <typename A>

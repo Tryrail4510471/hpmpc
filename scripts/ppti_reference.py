@@ -337,7 +337,9 @@ def gelu_poly(values: Matrix, cfg: Config) -> Matrix:
     for row in values:
         next_row = []
         for x in row:
-            next_row.append(max(x, q(0.0, cfg)))
+            gate = q_add(q_mul(x, 0.3125, cfg), q(0.5, cfg), cfg)
+            gate = min(max(gate, q(0.0, cfg)), q(1.0, cfg))
+            next_row.append(q_mul(x, gate, cfg))
         out.append(next_row)
     return out
 

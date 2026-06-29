@@ -19,7 +19,7 @@ existing HPMPC runtime as `FUNCTION_IDENTIFIER=87`.
   - attention value GEMM, head concatenation, and output projection
   - residual plus LayerNorm with learned gamma/beta and stabilized rsqrt
     baseline
-  - FFN with a ReLU-GELU correctness baseline
+  - FFN with a tuned hard-GELU correctness/accuracy baseline
   - second residual plus stabilized LayerNorm
 - `scripts/ppti_reference.py` mirrors the same TinyBERT-style stack in
   plaintext Python.
@@ -252,6 +252,41 @@ it currently pays an RHS re-layout cost at every matmul and still uses many
 small/medium GEMM calls. The next optimization is to cache or pre-export GEMM
 layout weights and only use CUDA where the matrix shape is large enough.
 
+Stage 12 replaces the ReLU-GELU baseline with tuned hard-GELU:
+
+```text
+gelu_tuned(x) = x * clamp(0.5 + 0.3125 * x, 0, 1)
+```
+
+Layer0 true-GELU approximation check on real seq=16 FFN pre-activations:
+
+```text
+ReLU baseline              max=0.1699712074 mean=0.0977432140
+standard hard-GELU x/6     max=0.2953695466 mean=0.1349476164
+tuned alpha ~= 0.30-0.325  mean ~= 0.0226-0.0248
+```
+
+Real seq=16 fixed trace after tuned hard-GELU:
+
+```text
+layer0_head0_probs max=0.006285352 mean=0.000163028266
+final_output       max=2.25368652  mean=0.317721248
+```
+
+No-trace seq=16 CPU after tuned hard-GELU:
+
+```text
+getTime ~= 6.75s
+P0 send=13.59MB
+P1/P2 send=10.74MB
+```
+
+Interpretation: tuned hard-GELU is much closer to true GELU than ReLU on the
+observed FFN activation distribution and remains numerically stable. It costs
+extra communication because it adds clamp comparisons and one multiplication.
+The final fixed-reference error is higher than the ReLU baseline, so the next
+step is LayerNorm/fixed-point calibration rather than more GELU changes alone.
+
 Synthetic model-file smoke test:
 
 ```sh
@@ -340,13 +375,12 @@ performance.
 
 The detailed execution checklist lives in `StudyNote/PPTI-TaskFlow.md`.
 
-1. Replace the ReLU-GELU baseline with a calibrated approximation that stays
-   stable for real TinyBERT FFN pre-activations.
+1. Calibrate LayerNorm reciprocal sqrt and fixed-point precision for the tuned
+   hard-GELU path.
 2. Cache or pre-export GEMM-layout RHS weights so `PPTI_MATMUL_BACKEND=1`
    does not re-layout every matmul.
-3. Further calibrate LayerNorm reciprocal sqrt and fixed-point precision.
-4. Replace the rational Softmax baseline with a lower-round lookup or
+3. Replace the rational Softmax baseline with a lower-round lookup or
    range-reduction design.
-5. Scale to `seq=64/128` after the GEMM path has a stable accelerated option.
-6. Scale constants from smoke dimensions to TinyBERT dimensions, then benchmark
+4. Scale to `seq=64/128` after the GEMM path has a stable accelerated option.
+5. Scale constants from smoke dimensions to TinyBERT dimensions, then benchmark
    CPU and CUDA paths separately.

@@ -377,6 +377,19 @@ seq=32 CPU  getTime ~= 9.16s  P0 send=25.83MB  P1/P2 send=21.96MB
 final_output max=3.82263965 mean=0.308568136
 ```
 
+阶段十二将 ReLU-GELU baseline 替换为 tuned hard-GELU：
+
+```text
+gelu_tuned(x) = x * clamp(0.5 + 0.3125 * x, 0, 1)
+```
+
+在真实 `seq=16` layer0 FFN pre-activation 上，tuned hard-GELU 相对 true GELU 的平均近似误差约为 `0.02-0.03`，明显低于 ReLU baseline 的 `0.0977`。端到端仍稳定：
+
+```text
+final_output max=2.25368652 mean=0.317721248
+seq=16 CPU getTime ~= 6.75s
+```
+
 当前代码支持通过 `MACRO_FLAGS` 切换形状。例如真实 TinyBERT-like 形状可尝试：
 
 ```sh
@@ -393,7 +406,7 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 
 1. 真实 TinyBERT encoder 权重、embedding 权重和 tokenizer input 路径已经接入。
 2. Attention mask 已接入，Softmax rational baseline 已压住概率爆值；它仍是正确性 baseline，不是最终低通信实现。
-3. GELU 已从 cubic surrogate 切换为 ReLU correctness baseline，解决了真实 FFN pre-activation 下的三次项爆炸；它不是最终精度方案。
+3. GELU 已从 ReLU correctness baseline 升级为 tuned hard-GELU，解决 cubic 爆炸的同时更接近 true GELU；仍需结合 LayerNorm/fixed-point 校准。
 4. LayerNorm 使用带 centered scaling 的 Newton reciprocal sqrt，已压住多层爆值；后续仍需针对精度和通信轮数优化。
 5. C++ fixed-point reveal trace 与 Python reference 已建立第一轮对齐，默认正确性 baseline 仍使用逐元素 dot-product 矩阵乘。
 6. `prepare_GEMM` 大矩阵爆值已通过 RHS layout adapter 修复；当前 `PPTI_MATMUL_BACKEND=1` 正确但 seq16 性能仍慢于 manual dot，需要缓存或预导出 GEMM layout 权重。
@@ -402,11 +415,10 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 
 推荐下一步顺序：
 
-1. 将 ReLU-GELU baseline 替换为更接近真实 GELU 的 piecewise / hard-GELU / lookup 方案。
+1. 校准 tuned hard-GELU 路径下的 LayerNorm reciprocal sqrt、定点小数位和截断策略。
 2. 为 `PPTI_MATMUL_BACKEND=1` 增加 RHS layout 缓存或预导出，避免每次 matmul 动态重排。
-3. 继续校准 LayerNorm reciprocal sqrt、定点小数位和截断策略。
-4. 在 GEMM 性能路径稳定后扩展到 `seq=64/128`。
-5. 将 Softmax rational baseline 替换为更低通信的 range reduction / lookup 方案。
+3. 在 GEMM 性能路径稳定后扩展到 `seq=64/128`。
+4. 将 Softmax rational baseline 替换为更低通信的 range reduction / lookup 方案。
 
 ## 10. 当前阶段结论
 
@@ -416,7 +428,7 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 
 - Transformer 的核心矩阵乘接口已经接入 HPMPC；`prepare_GEMM` RHS layout adapter 已修复大投影爆值，默认仍保留逐元素 dot-product correctness baseline。
 - Attention Softmax 的插入位置和调用链已经明确。
-- Softmax 后路径 trace 已完成，FFN/GELU 与后续 LayerNorm 的 `1e14` 爆值已通过阶段 9 correctness baseline 压住。
+- Softmax 后路径 trace 已完成，FFN/GELU 与后续 LayerNorm 的 `1e14` 爆值已压住；GELU 已升级为 tuned hard-GELU。
 - LayerNorm、GELU、residual、FFN 可以在 HPMPC 算术分享层组合出来。
 - CPU 和 CUDA GEMM backend 均可运行。
 - 后续工作可以集中在 Softmax、GELU、LayerNorm 近似精度和通信优化，以及 `prepare_GEMM` adapter 的布局缓存/性能优化上。

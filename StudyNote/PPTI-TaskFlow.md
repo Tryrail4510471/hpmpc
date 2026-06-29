@@ -1025,6 +1025,76 @@ P2 getTime=7.705598s
 - 当前 adapter 每次 matmul 都重排 RHS，且 seq16 形状下 CPU/CUDA GEMM adapter 都慢于 manual dot baseline；下一步性能优化应缓存或预导出 GEMM layout 权重，并减少小矩阵 CUDA 调用。
 - 默认仍保持 `PPTI_MATMUL_BACKEND=0`，避免影响已有 correctness/performance baseline。
 
+## 阶段 12：GELU approximation 升级
+
+目标：把阶段 9 的 ReLU-GELU correctness baseline 替换为更接近 true GELU 的 MPC-friendly 近似，同时保持真实 `seq=16` 端到端稳定。
+
+候选评估：
+
+```text
+true GELU: 0.5 * x * (1 + erf(x / sqrt(2)))
+ReLU baseline: max(x, 0)
+standard hard-GELU: x * clamp(0.5 + x / 6, 0, 1)
+tuned hard-GELU: x * clamp(0.5 + 0.3125 * x, 0, 1)
+```
+
+真实 layer0 FFN pre-activation 分布：
+
+```text
+min=-63.7238745 max=54.4401052 mean_abs=1.5958276
+```
+
+相对 true GELU 的 layer0 approximation error：
+
+```text
+ReLU baseline              max=0.1699712074 mean=0.0977432140
+standard hard-GELU x/6     max=0.2953695466 mean=0.1349476164
+tuned alpha search:
+  alpha=0.30               max=0.0796308238 mean=0.0247579766
+  alpha=0.325              max=0.0953306773 mean=0.0225662337
+```
+
+实现选择：
+
+```text
+gelu_tuned(x) = x * clamp(0.5 + 0.3125 * x, 0, 1)
+```
+
+说明：
+
+- `0.3125 = 5/16`，固定点表达友好。
+- 比 ReLU 更接近 true GELU。
+- 比标准 `x/6` hard-GELU 更适合当前 TinyBERT FFN 激活分布。
+- MPC 实现需要两次 `max_min_sint` clamp 和一次 secret multiplication。
+
+真实 seq=16 C++ vs Python fixed reference：
+
+```text
+layer0_head0_probs             max=0.006285352 mean=0.000163028266
+layer0_ffn_hidden_gelu_stats   max=67.288826  mean=22.5197127
+layer0_out                     max=4.259229   mean=0.261641119
+layer1_out                     max=5.8960229  mean=0.586889103
+layer2_out                     max=5.5986333  mean=0.566933372
+layer3_out                     max=2.25368652 mean=0.317721248
+final_output                   max=2.25368652 mean=0.317721248
+```
+
+真实 seq=16 no-trace CPU 性能：
+
+```text
+P0 send=13.59MB / 0.000008MB  getTime=6.746801s
+P1 send=0MB / 10.74MB         getTime=6.747408s
+P2 send=10.74MB / 0.000008MB  getTime=6.746765s
+```
+
+阶段判断：
+
+- tuned hard-GELU 在真实 layer0 分布上比 ReLU 更接近 true GELU，mean approximation error 从 `0.0977` 降到约 `0.02-0.03` 区间。
+- 端到端仍稳定，未出现 `1e14` 级爆值。
+- 相对 Python fixed reference 的 final mean error 从 ReLU baseline 的 `0.2455` 变为 `0.3177`，说明更接近 true GELU 的函数近似会放大当前 LayerNorm/fixed-point 对齐误差。
+- 速度从 ReLU baseline 的 `~6.52s` 变为 `~6.75s`，通信量增加，原因是 hard-GELU 多了 clamp 比较和一次乘法。
+- 后续需要配合 LayerNorm/fixed-point 校准，不能只替换 GELU。
+
 ## 提交流程
 
 每完成一个阶段：
@@ -1045,16 +1115,16 @@ git push origin master
 
 ## 下一步执行建议
 
-下一步进入阶段 12：
+下一步进入阶段 13：
 
 ```text
-GELU approximation 升级，并优化 GEMM adapter 的权重布局缓存。
+LayerNorm/fixed-point 校准，并优化 GEMM adapter 的权重布局缓存。
 ```
 
 最小可交付结果：
 
 ```text
-用 hard-GELU/piecewise GELU 替换 ReLU baseline
-真实 seq=16/32 fixed trace 不爆值
+调 FRACTIONAL / centered_scale / rsqrt_iterations
+降低 tuned hard-GELU 下 final_output fixed trace 误差
 评估预转置/预导出 GEMM layout 对性能的影响
 ```
