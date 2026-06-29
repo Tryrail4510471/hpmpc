@@ -337,22 +337,30 @@ def gelu_poly(values: Matrix, cfg: Config) -> Matrix:
     for row in values:
         next_row = []
         for x in row:
-            squared = q_mul(x, x, cfg)
-            cubic = q_mul(squared, x, cfg)
-            next_row.append(q_add(q_mul(x, 0.5, cfg), q_mul(cubic, 0.125, cfg), cfg))
+            next_row.append(max(x, q(0.0, cfg)))
         out.append(next_row)
     return out
 
 
-def layer_norm(values: Matrix, gamma: list[float], beta: list[float], cfg: Config) -> Matrix:
+def layer_norm(
+    values: Matrix,
+    gamma: list[float],
+    beta: list[float],
+    cfg: Config,
+    centered_scale: float = 1.0,
+    rsqrt_iterations: int = 3,
+    rsqrt_initial_guess: float = 1.0,
+) -> Matrix:
     out: Matrix = []
     inv_cols = q(1.0 / len(values[0]), cfg)
     for row in values:
         mean = q_mul(q_sum(row, cfg), inv_cols, cfg)
         centered = [q_sub(x, mean, cfg) for x in row]
+        if centered_scale != 1.0:
+            centered = [q_mul(x, 1.0 / centered_scale, cfg) for x in centered]
         squared = [q_mul(x, x, cfg) for x in centered]
-        variance = q_add(q_mul(q_sum(squared, cfg), inv_cols, cfg), q(0.001, cfg), cfg)
-        inv_std = reciprocal_sqrt_newton([variance], 3, 1.0, cfg)[0]
+        variance = q_add(q_mul(q_sum(squared, cfg), inv_cols, cfg), q(0.001 / (centered_scale * centered_scale), cfg), cfg)
+        inv_std = reciprocal_sqrt_newton([variance], rsqrt_iterations, rsqrt_initial_guess, cfg)[0]
         norm = [q_mul(x, inv_std, cfg) for x in centered]
         norm = [q_mul(x, gamma[i], cfg) for i, x in enumerate(norm)]
         out.append([q_add(x, beta[i], cfg) for i, x in enumerate(norm)])
@@ -456,26 +464,19 @@ def encoder_layer(
     ffn_gamma, ffn_beta = load_layer_norm_params(reader, base + 7000, cfg)
 
     attn_residual_pre_ln = add(hidden, attn_out, cfg)
-    if layer == 0:
-        traces["layer0_attn_residual_pre_ln_stats"] = matrix_stats(attn_residual_pre_ln)
-    attn_residual = layer_norm(attn_residual_pre_ln, attn_gamma, attn_beta, cfg)
-    if layer == 0:
-        traces["layer0_attn_residual_post_ln_stats"] = matrix_stats(attn_residual)
+    traces[f"layer{layer}_attn_residual_pre_ln_stats"] = matrix_stats(attn_residual_pre_ln)
+    attn_residual = layer_norm(attn_residual_pre_ln, attn_gamma, attn_beta, cfg, 128.0, 24, 1.0 / 64.0)
+    traces[f"layer{layer}_attn_residual_post_ln_stats"] = matrix_stats(attn_residual)
     ffn_hidden_linear = matmul(attn_residual, w1, cfg)
-    if layer == 0:
-        traces["layer0_ffn_hidden_linear_stats"] = matrix_stats(ffn_hidden_linear)
+    traces[f"layer{layer}_ffn_hidden_linear_stats"] = matrix_stats(ffn_hidden_linear)
     ffn_hidden = gelu_poly(add_bias(ffn_hidden_linear, b1, cfg), cfg)
-    if layer == 0:
-        traces["layer0_ffn_hidden_gelu_stats"] = matrix_stats(ffn_hidden)
+    traces[f"layer{layer}_ffn_hidden_gelu_stats"] = matrix_stats(ffn_hidden)
     ffn_out = add_bias(matmul(ffn_hidden, w2, cfg), b2, cfg)
-    if layer == 0:
-        traces["layer0_ffn_out_stats"] = matrix_stats(ffn_out)
+    traces[f"layer{layer}_ffn_out_stats"] = matrix_stats(ffn_out)
     ffn_residual_pre_ln = add(attn_residual, ffn_out, cfg)
-    if layer == 0:
-        traces["layer0_ffn_residual_pre_ln_stats"] = matrix_stats(ffn_residual_pre_ln)
-    out = layer_norm(ffn_residual_pre_ln, ffn_gamma, ffn_beta, cfg)
-    if layer == 0:
-        traces["layer0_ffn_residual_post_ln_stats"] = matrix_stats(out)
+    traces[f"layer{layer}_ffn_residual_pre_ln_stats"] = matrix_stats(ffn_residual_pre_ln)
+    out = layer_norm(ffn_residual_pre_ln, ffn_gamma, ffn_beta, cfg, 128.0, 24, 1.0 / 64.0)
+    traces[f"layer{layer}_ffn_residual_post_ln_stats"] = matrix_stats(out)
     traces[f"layer{layer}_out"] = out
     return out
 
@@ -543,7 +544,7 @@ def main() -> None:
         f"hidden:{cfg.hidden} seq:{cfg.seq_len} ffn:{cfg.ffn_hidden} mode:{mode}"
     )
     if args.trace:
-        for name in [
+        trace_names = [
             "embedding_out",
             "layer0_input_stats",
             "layer0_wq_stats",
@@ -567,19 +568,23 @@ def main() -> None:
             "layer0_wo_stats",
             "layer0_attn_out_linear_stats",
             "layer0_attn_out_stats",
-            "layer0_attn_residual_pre_ln_stats",
-            "layer0_attn_residual_post_ln_stats",
-            "layer0_ffn_hidden_linear_stats",
-            "layer0_ffn_hidden_gelu_stats",
-            "layer0_ffn_out_stats",
-            "layer0_ffn_residual_pre_ln_stats",
-            "layer0_ffn_residual_post_ln_stats",
-            "layer0_out",
-            "layer1_out",
-            "layer2_out",
-            "layer3_out",
             "final_output",
-        ]:
+        ]
+        layer_suffixes = [
+            "attn_residual_pre_ln_stats",
+            "attn_residual_post_ln_stats",
+            "ffn_hidden_linear_stats",
+            "ffn_hidden_gelu_stats",
+            "ffn_out_stats",
+            "ffn_residual_pre_ln_stats",
+            "ffn_residual_post_ln_stats",
+            "out",
+        ]
+        for layer in range(cfg.layers):
+            for suffix in layer_suffixes:
+                trace_names.insert(-1, f"layer{layer}_{suffix}")
+
+        for name in trace_names:
             if name in traces:
                 print_trace(name, traces[name])
     if args.dump:

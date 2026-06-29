@@ -522,6 +522,16 @@ void trace_stats(const char* name, const std::vector<A>& values)
 }
 
 template <typename A>
+void trace_layer_stats(int layer, const char* suffix, const std::vector<A>& values)
+{
+    if constexpr (TRACE_ENABLED == 1)
+    {
+        const std::string name = "layer" + std::to_string(layer) + "_" + suffix;
+        trace_stats(name.c_str(), values);
+    }
+}
+
+template <typename A>
 void add_bias(std::vector<A>& matrix, const std::vector<A>& bias, int rows, int cols)
 {
     for (int r = 0; r < rows; r++)
@@ -567,40 +577,13 @@ void scale_public(std::vector<A>& values, float scale)
 template <typename A>
 void secure_gelu_poly(std::vector<A>& values)
 {
-    std::vector<A> squared(values.size());
+    std::vector<A> candidates(values.size() * 2);
     for (int i = 0; i < static_cast<int>(values.size()); i++)
     {
-        squared[i] = values[i].prepare_dot(values[i]);
-        squared[i].mask_and_send_dot();
+        candidates[2 * i] = values[i];
+        candidates[2 * i + 1] = A(0);
     }
-    A::communicate();
-    for (auto& value : squared)
-        value.complete_mult();
-
-    std::vector<A> cubic(values.size());
-    for (int i = 0; i < static_cast<int>(values.size()); i++)
-    {
-        cubic[i] = squared[i].prepare_dot(values[i]);
-        cubic[i].mask_and_send_dot();
-    }
-    A::communicate();
-    for (auto& value : cubic)
-        value.complete_mult();
-
-    const UINT_TYPE half = fixed(0.5f);
-    const UINT_TYPE eighth = fixed(0.125f);
-    for (auto& value : values)
-        value = value.prepare_mult_public_fixed(half);
-    for (auto& value : cubic)
-        value = value.prepare_mult_public_fixed(eighth);
-    A::communicate();
-    for (auto& value : values)
-        value.complete_public_mult_fixed();
-    for (auto& value : cubic)
-        value.complete_public_mult_fixed();
-
-    for (int i = 0; i < static_cast<int>(values.size()); i++)
-        values[i] += cubic[i];
+    max_min_sint<0, BITLENGTH>(candidates.data(), 2, values.data(), values.size(), true);
 }
 
 template <typename A>
@@ -681,7 +664,14 @@ void reciprocal_sqrt_newton(std::vector<A>& values, std::vector<A>& reciprocal_s
 }
 
 template <typename A>
-void secure_rowwise_layer_norm(std::vector<A>& values, const std::vector<A>& gamma, const std::vector<A>& beta, int rows, int cols)
+void secure_rowwise_layer_norm(std::vector<A>& values,
+                               const std::vector<A>& gamma,
+                               const std::vector<A>& beta,
+                               int rows,
+                               int cols,
+                               float centered_scale = 1.0f,
+                               int rsqrt_iterations = 3,
+                               float rsqrt_initial_guess = 1.0f)
 {
     std::vector<A> mean(rows, A(0));
     for (int r = 0; r < rows; r++)
@@ -699,6 +689,9 @@ void secure_rowwise_layer_norm(std::vector<A>& values, const std::vector<A>& gam
     for (int r = 0; r < rows; r++)
         for (int c = 0; c < cols; c++)
             centered[r * cols + c] = values[r * cols + c] - mean[r];
+
+    if (centered_scale != 1.0f)
+        scale_public(centered, 1.0f / centered_scale);
 
     std::vector<A> squared(centered.size());
     for (int i = 0; i < static_cast<int>(centered.size()); i++)
@@ -721,12 +714,12 @@ void secure_rowwise_layer_norm(std::vector<A>& values, const std::vector<A>& gam
     for (auto& value : variance)
         value.complete_public_mult_fixed();
 
-    const A epsilon(fixed(0.001f));
+    const A epsilon(fixed(0.001f / (centered_scale * centered_scale)));
     for (auto& value : variance)
         value += epsilon;
 
     std::vector<A> inv_std;
-    reciprocal_sqrt_newton(variance, inv_std, 3, 1.0f);
+    reciprocal_sqrt_newton(variance, inv_std, rsqrt_iterations, rsqrt_initial_guess);
 
     for (int r = 0; r < rows; r++)
     {
@@ -962,32 +955,25 @@ void secure_tinybert_encoder_layer(std::vector<A>& hidden, int layer)
     secure_multi_head_attention(hidden, wq, wk, wv, wo, bq, bk, bv, bo, layer, attn_out);
     for (int i = 0; i < static_cast<int>(hidden.size()); i++)
         attn_residual[i] = hidden[i] + attn_out[i];
-    if (layer == 0)
-        trace_stats("layer0_attn_residual_pre_ln_stats", attn_residual);
-    secure_rowwise_layer_norm(attn_residual, attn_gamma, attn_beta, SEQ_LEN, HIDDEN);
-    if (layer == 0)
-        trace_stats("layer0_attn_residual_post_ln_stats", attn_residual);
+    trace_layer_stats(layer, "attn_residual_pre_ln_stats", attn_residual);
+    secure_rowwise_layer_norm(attn_residual, attn_gamma, attn_beta, SEQ_LEN, HIDDEN, 128.0f, 24, 1.0f / 64.0f);
+    trace_layer_stats(layer, "attn_residual_post_ln_stats", attn_residual);
 
     std::vector<A> ffn_hidden(SEQ_LEN * FFN_HIDDEN), ffn_out(SEQ_LEN * HIDDEN);
     secure_matmul(attn_residual, w1, ffn_hidden, SEQ_LEN, HIDDEN, FFN_HIDDEN);
-    if (layer == 0)
-        trace_stats("layer0_ffn_hidden_linear_stats", ffn_hidden);
+    trace_layer_stats(layer, "ffn_hidden_linear_stats", ffn_hidden);
     add_bias(ffn_hidden, b1, SEQ_LEN, FFN_HIDDEN);
     secure_gelu_poly(ffn_hidden);
-    if (layer == 0)
-        trace_stats("layer0_ffn_hidden_gelu_stats", ffn_hidden);
+    trace_layer_stats(layer, "ffn_hidden_gelu_stats", ffn_hidden);
     secure_matmul(ffn_hidden, w2, ffn_out, SEQ_LEN, FFN_HIDDEN, HIDDEN);
     add_bias(ffn_out, b2, SEQ_LEN, HIDDEN);
-    if (layer == 0)
-        trace_stats("layer0_ffn_out_stats", ffn_out);
+    trace_layer_stats(layer, "ffn_out_stats", ffn_out);
 
     for (int i = 0; i < static_cast<int>(hidden.size()); i++)
         hidden[i] = attn_residual[i] + ffn_out[i];
-    if (layer == 0)
-        trace_stats("layer0_ffn_residual_pre_ln_stats", hidden);
-    secure_rowwise_layer_norm(hidden, ffn_gamma, ffn_beta, SEQ_LEN, HIDDEN);
-    if (layer == 0)
-        trace_stats("layer0_ffn_residual_post_ln_stats", hidden);
+    trace_layer_stats(layer, "ffn_residual_pre_ln_stats", hidden);
+    secure_rowwise_layer_norm(hidden, ffn_gamma, ffn_beta, SEQ_LEN, HIDDEN, 128.0f, 24, 1.0f / 64.0f);
+    trace_layer_stats(layer, "ffn_residual_post_ln_stats", hidden);
 
     if (layer == 0)
         trace_matrix("layer0_out", hidden, SEQ_LEN, HIDDEN);

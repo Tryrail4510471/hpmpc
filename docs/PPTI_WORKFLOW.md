@@ -17,9 +17,10 @@ existing HPMPC runtime as `FUNCTION_IDENTIFIER=87`.
   - row-wise stable Softmax slot using masked row max, rational exp, and
     secret row-sum reciprocal
   - attention value GEMM, head concatenation, and output projection
-  - residual plus LayerNorm with learned gamma/beta
-  - FFN with a cubic GELU surrogate
-  - second residual plus LayerNorm
+  - residual plus LayerNorm with learned gamma/beta and stabilized rsqrt
+    baseline
+  - FFN with a ReLU-GELU correctness baseline
+  - second residual plus stabilized LayerNorm
 - `scripts/ppti_reference.py` mirrors the same TinyBERT-style stack in
   plaintext Python.
 
@@ -160,6 +161,34 @@ surrogate: real TinyBERT FFN pre-activations reach roughly `[-63, 58]`, where
 the cubic term grows to `~3e4`. That pushes FFN output to `~9e5`, after which
 LayerNorm reciprocal sqrt becomes unstable.
 
+Stage 9 replaces the cubic GELU surrogate with a ReLU-GELU correctness
+baseline and runs both attention LayerNorm and FFN LayerNorm through a
+stabilized reciprocal-sqrt path:
+
+```text
+gelu_baseline(x) = max(x, 0)
+centered_scale=128
+rsqrt_iterations=24
+rsqrt_initial_guess=1/64
+epsilon=0.001 / centered_scale^2
+```
+
+Real seq=16 fixed-point trace comparison after Stage 9:
+
+```text
+layer0_out   max=2.6417783 mean=0.2086785
+layer1_out   max=5.4381221 mean=0.450146234
+layer2_out   max=7.63491211 mean=0.71829986
+layer3_out   max=2.25173633 mean=0.245499895
+final_output max=2.25173633 mean=0.245499895
+```
+
+Interpretation: the 4-layer TinyBERT seq=16 path no longer produces `1e14`
+explosions. This is still a correctness baseline, not a final accuracy design:
+the final output has non-trivial approximation error and should be improved
+with a calibrated GELU approximation, better LayerNorm/range parameters, and
+fixed-point precision tuning.
+
 Synthetic model-file smoke test:
 
 ```sh
@@ -248,13 +277,14 @@ performance.
 
 The detailed execution checklist lives in `StudyNote/PPTI-TaskFlow.md`.
 
-1. Add a Python fixed-point reference so trace error can separate quantization
-   from protocol/approximation error.
-2. Replace the cubic GELU surrogate with a calibrated approximation that does
-   not explode for real TinyBERT FFN pre-activations.
-3. Calibrate LayerNorm reciprocal sqrt for the post-FFN value range.
+1. Measure no-trace CPU/CUDA performance for the Stage 9 correctness baseline
+   and extend from `seq=16` to `seq=32`.
+2. Replace the ReLU-GELU baseline with a calibrated approximation that stays
+   stable for real TinyBERT FFN pre-activations.
+3. Further calibrate LayerNorm reciprocal sqrt and fixed-point precision.
 4. Replace the rational Softmax baseline with a lower-round lookup or
    range-reduction design.
-5. Calibrate fixed-point precision and truncation.
+5. Restore or repair the `prepare_GEMM` large projection path after keeping the
+   manual dot-product baseline as the correctness oracle.
 6. Scale constants from smoke dimensions to TinyBERT dimensions, then benchmark
    CPU and CUDA paths separately.

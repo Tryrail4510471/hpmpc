@@ -346,6 +346,23 @@ exp(x) ~= 1 / (1 - x + 0.5*x^2), x <= 0
 
 阶段五已完成真实 `seq=16` 小样本端到端 CPU/CUDA 推理。使用真实 TinyBERT encoder 权重、真实 embedding 权重和 tokenizer input，CPU online `getTime` 约 `6.30s`，通信量约 P0 发送 `7.099MB`、P1/P2 发送 `5.201MB`。机器重启后 `nvidia-smi` 正常，按 RTX 2060 的 `sm_75` 重编 CUTLASS 对象后，CUDA 复测无 CUTLASS error，online `getTime` 约 `6.40s`。
 
+阶段九已完成 GELU 与 LayerNorm 稳定化 correctness baseline：
+
+```text
+GELU: cubic surrogate -> ReLU baseline max(x, 0)
+LayerNorm: centered_scale=128, rsqrt_iterations=24, rsqrt_initial_guess=1/64
+```
+
+真实 `seq=16`、4 层 TinyBERT fixed-point trace 对齐后，4 层端到端不再出现 `1e14` 级爆值：
+
+```text
+layer0_out   max=2.6417783 mean=0.2086785
+layer1_out   max=5.4381221 mean=0.450146234
+layer2_out   max=7.63491211 mean=0.71829986
+layer3_out   max=2.25173633 mean=0.245499895
+final_output max=2.25173633 mean=0.245499895
+```
+
 当前代码支持通过 `MACRO_FLAGS` 切换形状。例如真实 TinyBERT-like 形状可尝试：
 
 ```sh
@@ -362,20 +379,20 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 
 1. 真实 TinyBERT encoder 权重、embedding 权重和 tokenizer input 路径已经接入。
 2. Attention mask 已接入，Softmax rational baseline 已压住概率爆值；它仍是正确性 baseline，不是最终低通信实现。
-3. GELU 使用 cubic surrogate，尚未校准。
-4. LayerNorm 使用 Newton reciprocal sqrt，但初值和迭代次数仍需针对真实数值范围调优。
+3. GELU 已从 cubic surrogate 切换为 ReLU correctness baseline，解决了真实 FFN pre-activation 下的三次项爆炸；它不是最终精度方案。
+4. LayerNorm 使用带 centered scaling 的 Newton reciprocal sqrt，已压住多层爆值；后续仍需针对精度和通信轮数优化。
 5. C++ fixed-point reveal trace 与 Python reference 已建立第一轮对齐，当前正确性 baseline 使用逐元素 dot-product 矩阵乘。
-6. 原 `prepare_GEMM` 大矩阵路径需要单独缩小复现；阶段 8 已确认当前端到端第一处主要数值问题在 FFN 的 cubic GELU surrogate。
+6. 原 `prepare_GEMM` 大矩阵路径需要单独缩小复现；当前端到端正确性 baseline 继续使用逐元素 dot-product 矩阵乘作为对齐 oracle。
 
 ## 9. 下一步开发计划
 
 推荐下一步顺序：
 
-1. 替换 cubic GELU surrogate，避免真实 TinyBERT FFN pre-activation `[-63, 58]` 下三次项爆炸。
-2. 校准 post-FFN LayerNorm reciprocal sqrt。
-3. 单独构造 `prepare_GEMM` 大矩阵复现用例，定位 TinyBERT projection 爆值原因。
-4. 将 Softmax rational baseline 替换为更低通信的 range reduction / lookup 方案。
-5. 在 `seq=16` 误差收敛后再扩大到 `seq=32/64/128`。
+1. 做无 trace 的 seq=16 CPU/CUDA 性能复测，并扩展到 `seq=32`。
+2. 将 ReLU-GELU baseline 替换为更接近真实 GELU 的 piecewise / hard-GELU / lookup 方案。
+3. 继续校准 LayerNorm reciprocal sqrt、定点小数位和截断策略。
+4. 单独构造 `prepare_GEMM` 大矩阵复现用例，定位 TinyBERT projection 爆值原因。
+5. 将 Softmax rational baseline 替换为更低通信的 range reduction / lookup 方案。
 
 ## 10. 当前阶段结论
 
@@ -385,7 +402,7 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 
 - Transformer 的核心矩阵乘接口已经接入 HPMPC；当前正确性 baseline 先使用逐元素 dot-product，`prepare_GEMM` 大投影路径需继续定位。
 - Attention Softmax 的插入位置和调用链已经明确。
-- Softmax 后路径 trace 已完成，当前主要数值风险已定位到 FFN/GELU 与后续 LayerNorm。
+- Softmax 后路径 trace 已完成，FFN/GELU 与后续 LayerNorm 的 `1e14` 爆值已通过阶段 9 correctness baseline 压住。
 - LayerNorm、GELU、residual、FFN 可以在 HPMPC 算术分享层组合出来。
 - CPU 和 CUDA GEMM backend 均可运行。
-- 后续工作可以集中在 Softmax、GELU、LayerNorm 近似优化，以及 `prepare_GEMM` 大矩阵路径修复上。
+- 后续工作可以集中在 Softmax、GELU、LayerNorm 近似精度和通信优化，以及 `prepare_GEMM` 大矩阵路径修复上。

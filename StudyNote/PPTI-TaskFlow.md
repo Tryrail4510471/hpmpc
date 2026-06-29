@@ -778,7 +778,96 @@ C++ layer0_ffn_out_stats:                 min=-6.552e5 max=9.196e5 mean_abs=2114
 - FFN output 被放大到 `~9e5` 后，后续 LayerNorm reciprocal sqrt 也失稳，最终表现为 `layer0_out/final_output` 的 `1e14` 级异常。
 - 下一阶段应优先替换 GELU approximation，再校准 LayerNorm reciprocal sqrt。
 
-## 阶段 9：性能评估
+## 阶段 9：GELU approximation 与 LayerNorm rsqrt 稳定化
+
+目标：阶段 8 已定位到当前 cubic GELU surrogate 在真实 TinyBERT FFN pre-activation `[-63, 58]` 下严重放大数值。本阶段先建立不爆炸的 correctness baseline。
+
+原实现：
+
+```text
+gelu_poly(x) = 0.5*x + 0.125*x^3
+```
+
+问题：
+
+```text
+FFN pre-activation min/max ~= [-63, 58]
+cubic term 会产生 ~3e4 级输出
+FFN output 进一步到 ~9e5
+post-FFN LayerNorm reciprocal sqrt 失稳
+```
+
+当前替换为 ReLU-GELU baseline：
+
+```text
+gelu_baseline(x) = max(x, 0)
+```
+
+实现方式：
+
+- C++：`secure_gelu_poly` 内用 `max_min_sint<0, BITLENGTH>` 对每个 secret value 和公开 0 求 max。
+- Python fixed reference：`max(x, 0)`。
+- C++/Python：attention LayerNorm 和 FFN LayerNorm 都切到同一套稳定参数：
+
+```text
+centered_scale=128
+rsqrt_iterations=24
+rsqrt_initial_guess=1/64
+epsilon=0.001 / centered_scale^2
+```
+
+- Trace：新增每层关键统计，形如 `layerN_attn_residual_post_ln_stats`、`layerN_ffn_residual_post_ln_stats`、`layerN_out`。
+
+阶段判断：
+
+- 这不是最终 TinyBERT GELU 精度方案，而是第一步 correctness baseline。
+- ReLU baseline 先压住 cubic GELU 的三次项爆炸；LayerNorm 的 centered scaling 解决多层 attention/FFN rsqrt 初值失稳。
+- 后续再替换为更贴近 GELU 的 hard-GELU、piecewise polynomial 或 lookup/range-reduction 方案。
+
+阶段 9 实测结果：
+
+```text
+real seq=16 C++ vs Python fixed reference:
+layer0_attn_residual_post_ln_stats  max=28.7936377 mean=9.78902855
+layer0_ffn_residual_post_ln_stats   max=2.6417783  mean=0.901285394
+layer0_out                          max=2.6417783  mean=0.2086785
+layer1_attn_residual_post_ln_stats  max=35.5218042 mean=17.5961049
+layer1_ffn_residual_post_ln_stats   max=3.7191846  mean=1.44889311
+layer1_out                          max=5.4381221  mean=0.450146234
+layer2_attn_residual_post_ln_stats  max=5.81895508 mean=2.14596096
+layer2_ffn_residual_post_ln_stats   max=5.56136475 mean=2.17044002
+layer2_out                          max=7.63491211 mean=0.71829986
+layer3_attn_residual_post_ln_stats  max=2.12800244 mean=1.15842895
+layer3_ffn_residual_post_ln_stats   max=2.01873633 mean=0.9147061
+layer3_out                          max=2.25173633 mean=0.245499895
+final_output                        max=2.25173633 mean=0.245499895
+```
+
+原始输出范围：
+
+```text
+Python final_output: min=-3.07116699 max=4.35473633 mean_abs=0.3119489596
+C++ final_output:    min=-3.703      max=2.336      mean_abs=0.2183957588
+```
+
+阶段结论：
+
+- `layer0_ffn_hidden_gelu_stats` 不再出现 `~3e4` 放大。
+- `layer0_ffn_out_stats` 不再出现 `~9e5` 放大。
+- 4 层真实 TinyBERT seq=16 端到端不再出现 `1e14` 级爆值。
+- 当前仍是 correctness baseline：final 输出误差还在 `max ~= 2.25`，需要继续做 GELU 精度、LayerNorm 近似和固定点参数校准。
+- P0 trace 日志有时会先出现一组全零 trace，后面才是真实 reveal trace；对比时以有效 trace 为准。
+
+验收标准：
+
+```text
+layer0_ffn_hidden_gelu_stats 不再出现 ~3e4 放大：完成
+layer0_ffn_out_stats 不再出现 ~9e5 放大：完成
+layer0_ffn_residual_post_ln_stats 不再出现 1e14 爆值：完成
+真实 seq=16 C++ vs Python fixed reference 仍能逐层对齐：完成
+```
+
+## 阶段 10：性能评估
 
 目标：得到 CPU/CUDA、不同 seq_len、不同近似方案下的效率数据。
 
@@ -828,16 +917,16 @@ git push origin master
 
 ## 下一步执行建议
 
-下一步进入阶段 8：
+下一步进入阶段 10：
 
 ```text
-Softmax 后路径对齐，定位 layer0_out 巨大误差来源。
+性能评估与 seq_len 扩展，同时保留阶段 9 的 correctness baseline。
 ```
 
 最小可交付结果：
 
 ```text
-真实 seq=16 下输出新增 post-Softmax trace 比较
-明确首个发散点：context / output projection / LayerNorm / FFN
-StudyNote/PPTI-TaskFlow.md 更新阶段 8 状态
+无 trace 的 seq=16 CPU/CUDA 性能数据
+seq=32 编译和小样本运行结果
+记录 LayerNorm/GELU correctness baseline 的误差和剩余风险
 ```
