@@ -189,6 +189,31 @@ the final output has non-trivial approximation error and should be improved
 with a calibrated GELU approximation, better LayerNorm/range parameters, and
 fixed-point precision tuning.
 
+Stage 10 no-trace performance baseline:
+
+```text
+seq=16 CPU  getTime ~= 6.52s  P0 send=9.915MB  P1/P2 send=8.291MB
+seq=16 CUDA getTime ~= 7.35s  P0 send=9.915MB  P1/P2 send=8.291MB
+seq=32 CPU  getTime ~= 9.16s  P0 send=25.83MB  P1/P2 send=21.96MB
+```
+
+Stage 10 seq=32 fixed-point trace comparison:
+
+```text
+layer0_head0_probs max=0.005459473 mean=0.000100898513
+layer0_out         max=3.10990518  mean=0.204591555
+layer1_out         max=6.0576191   mean=0.6396979
+layer2_out         max=7.6165815   mean=0.549741695
+layer3_out         max=3.82263965  mean=0.308568136
+final_output       max=3.82263965  mean=0.308568136
+```
+
+Interpretation: the Stage 9 stabilized correctness baseline extends from
+`seq=16` to `seq=32` without `1e14` explosions. CUDA currently runs cleanly but
+does not accelerate this baseline at `seq=16`, because the path is still
+dominated by small/medium matrix shapes, comparison-heavy approximations, and
+the manual dot-product correctness oracle.
+
 Synthetic model-file smoke test:
 
 ```sh
@@ -277,14 +302,13 @@ performance.
 
 The detailed execution checklist lives in `StudyNote/PPTI-TaskFlow.md`.
 
-1. Measure no-trace CPU/CUDA performance for the Stage 9 correctness baseline
-   and extend from `seq=16` to `seq=32`.
+1. Build a minimal `prepare_GEMM` vs manual dot-product repro for the
+   TinyBERT projection shape and isolate the large projection explosion.
 2. Replace the ReLU-GELU baseline with a calibrated approximation that stays
    stable for real TinyBERT FFN pre-activations.
 3. Further calibrate LayerNorm reciprocal sqrt and fixed-point precision.
 4. Replace the rational Softmax baseline with a lower-round lookup or
    range-reduction design.
-5. Restore or repair the `prepare_GEMM` large projection path after keeping the
-   manual dot-product baseline as the correctness oracle.
+5. Scale to `seq=64/128` after the GEMM path has a stable accelerated option.
 6. Scale constants from smoke dimensions to TinyBERT dimensions, then benchmark
    CPU and CUDA paths separately.

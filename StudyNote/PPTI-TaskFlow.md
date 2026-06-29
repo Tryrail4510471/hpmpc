@@ -897,6 +897,62 @@ CUDA 注意：
 - 需要给 CUTLASS 设定支持的小矩阵 fallback 或只在大矩阵启用 CUDA。
 - 如果 CUTLASS internal error 仍出现，先做 CPU baseline，不阻塞协议正确性。
 
+阶段 10 第一轮结果：
+
+```text
+seq=16 CPU no-trace:
+P0 send=9.915MB / 0.000008MB  getTime=6.524174s
+P1 send=0MB / 8.291MB         getTime=6.525956s
+P2 send=8.291MB / 0.000008MB  getTime=6.524253s
+
+seq=16 CUDA no-trace:
+P0 send=9.915MB / 0.000008MB  getTime=7.345492s
+P1 send=0MB / 8.291MB         getTime=7.346379s
+P2 send=8.291MB / 0.000008MB  getTime=7.345073s
+
+seq=32 CPU no-trace:
+P0 send=25.83MB / 0.000008MB  getTime=9.160846s
+P1 send=0MB / 21.96MB         getTime=9.160161s
+P2 send=21.96MB / 0.000008MB  getTime=9.159894s
+```
+
+seq=32 输入导出命令：
+
+```sh
+python3 scripts/ppti_export_tinybert_inputs.py \
+  --model huawei-noah/TinyBERT_General_4L_312D \
+  --seq-len 32 \
+  --text "privacy preserving transformer inference with secure multi party computation baseline benchmark" \
+  --embedding-output models/ppti/tinybert_embeddings_ppti.bin \
+  --input-output models/ppti/sample_input_seq32.bin
+```
+
+seq=32 C++ vs Python fixed reference：
+
+```text
+layer0_head0_probs max=0.005459473 mean=0.000100898513
+layer0_out         max=3.10990518  mean=0.204591555
+layer1_out         max=6.0576191   mean=0.6396979
+layer2_out         max=7.6165815   mean=0.549741695
+layer3_out         max=3.82263965  mean=0.308568136
+final_output       max=3.82263965  mean=0.308568136
+```
+
+seq=32 原始输出范围：
+
+```text
+Python final_output: min=-5.28063965 max=4.45996094 mean_abs=0.4510626182
+C++ final_output:    min=-2.044      max=4.337      mean_abs=0.2465803552
+```
+
+阶段判断：
+
+- Stage 9 稳定化参数可以从 `seq=16` 扩展到 `seq=32`，未出现 `1e14` 级数值爆炸。
+- `seq=16` CUDA 可跑通且无 CUTLASS error，但当前 no-trace 时间约 `7.35s`，慢于 CPU 的 `6.52s`。
+- `seq=32` 通信量显著上升：P0 从 `9.915MB` 增至 `25.83MB`，P1/P2 从 `8.291MB` 增至 `21.96MB`。
+- `seq=32` online time 从 `~6.52s` 增至 `~9.16s`。
+- P0 trace 日志仍可能先输出一组全零 trace，后续才是真实 reveal trace；对比时需要使用有效 trace。
+
 ## 提交流程
 
 每完成一个阶段：
@@ -917,16 +973,16 @@ git push origin master
 
 ## 下一步执行建议
 
-下一步进入阶段 10：
+下一步进入阶段 11：
 
 ```text
-性能评估与 seq_len 扩展，同时保留阶段 9 的 correctness baseline。
+修复 prepare_GEMM 大矩阵路径，并开始替换 ReLU-GELU correctness baseline。
 ```
 
 最小可交付结果：
 
 ```text
-无 trace 的 seq=16 CPU/CUDA 性能数据
-seq=32 编译和小样本运行结果
-记录 LayerNorm/GELU correctness baseline 的误差和剩余风险
+prepare_GEMM vs manual dot 的最小复现
+定位 TinyBERT projection 爆值原因
+提出 GELU approximation 升级候选并选定一个实现
 ```

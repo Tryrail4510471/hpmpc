@@ -363,6 +363,20 @@ layer3_out   max=2.25173633 mean=0.245499895
 final_output max=2.25173633 mean=0.245499895
 ```
 
+阶段十建立了第一轮 no-trace 性能基线，并扩展到 `seq=32`：
+
+```text
+seq=16 CPU  getTime ~= 6.52s  P0 send=9.915MB  P1/P2 send=8.291MB
+seq=16 CUDA getTime ~= 7.35s  P0 send=9.915MB  P1/P2 send=8.291MB
+seq=32 CPU  getTime ~= 9.16s  P0 send=25.83MB  P1/P2 send=21.96MB
+```
+
+`seq=32` fixed-point trace 仍保持稳定：
+
+```text
+final_output max=3.82263965 mean=0.308568136
+```
+
 当前代码支持通过 `MACRO_FLAGS` 切换形状。例如真实 TinyBERT-like 形状可尝试：
 
 ```sh
@@ -388,10 +402,10 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 
 推荐下一步顺序：
 
-1. 做无 trace 的 seq=16 CPU/CUDA 性能复测，并扩展到 `seq=32`。
+1. 单独构造 `prepare_GEMM` 大矩阵复现用例，定位 TinyBERT projection 爆值原因。
 2. 将 ReLU-GELU baseline 替换为更接近真实 GELU 的 piecewise / hard-GELU / lookup 方案。
 3. 继续校准 LayerNorm reciprocal sqrt、定点小数位和截断策略。
-4. 单独构造 `prepare_GEMM` 大矩阵复现用例，定位 TinyBERT projection 爆值原因。
+4. 在 GEMM 路径稳定后扩展到 `seq=64/128`。
 5. 将 Softmax rational baseline 替换为更低通信的 range reduction / lookup 方案。
 
 ## 10. 当前阶段结论
