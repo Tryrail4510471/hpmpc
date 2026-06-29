@@ -342,7 +342,7 @@ exp(x) ~= 1 / (1 - x + 0.5*x^2), x <= 0
 
 同时修正了 masked row max：在求 row max 前把 masked score 替换为公开常数 `-1024`，避免 padding token 成为 row-max stabilization 的中心。
 
-阶段四已建立 C++ fixed-point trace 与 Python reference 的比较流程。smoke 结果显示 `embedding_out` 完全对齐，第一处误差从 `layer0_head0_scores` 开始，最终输出 `max_abs_error` 约为 `0.68885958`。真实 `seq=16` 统计 trace 进一步证明：embedding 与第一层 Q/K/V 权重加载正确，原 `prepare_GEMM` 路径在 TinyBERT 大投影形状下会把 `layer0_q_linear_stats` 放大到 `±5.6e14`；临时切换为逐元素 dot-product baseline 后，Q/K/V projection 与 QK score 已和 Python fixed-point reference 对齐。阶段 7 后，`layer0_head0_probs` 误差已从 `~5.44e14` 降到 `max=0.006285352, mean=0.000163028266`，新的主要发散点后移到 Softmax 之后。
+阶段四已建立 C++ fixed-point trace 与 Python reference 的比较流程。smoke 结果显示 `embedding_out` 完全对齐，第一处误差从 `layer0_head0_scores` 开始，最终输出 `max_abs_error` 约为 `0.68885958`。真实 `seq=16` 统计 trace 进一步证明：embedding 与第一层 Q/K/V 权重加载正确，原直接 `prepare_GEMM` 路径在 TinyBERT 大投影形状下会把 `layer0_q_linear_stats` 放大到 `±5.6e14`；根因是 Transformer 权重按 `[inner, cols]` 导出，而 HPMPC GEMM 按 `[cols, inner]` 读取 RHS。阶段 11 已新增 `PPTI_MATMUL_BACKEND=1`，在调用 `prepare_GEMM` 前转换 RHS layout，真实 `seq=16` 下 `layer0_q_linear_stats` 已恢复到 `max=0.00963574, mean=0.00625384667`。
 
 阶段五已完成真实 `seq=16` 小样本端到端 CPU/CUDA 推理。使用真实 TinyBERT encoder 权重、真实 embedding 权重和 tokenizer input，CPU online `getTime` 约 `6.30s`，通信量约 P0 发送 `7.099MB`、P1/P2 发送 `5.201MB`。机器重启后 `nvidia-smi` 正常，按 RTX 2060 的 `sm_75` 重编 CUTLASS 对象后，CUDA 复测无 CUTLASS error，online `getTime` 约 `6.40s`。
 
@@ -395,17 +395,17 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 2. Attention mask 已接入，Softmax rational baseline 已压住概率爆值；它仍是正确性 baseline，不是最终低通信实现。
 3. GELU 已从 cubic surrogate 切换为 ReLU correctness baseline，解决了真实 FFN pre-activation 下的三次项爆炸；它不是最终精度方案。
 4. LayerNorm 使用带 centered scaling 的 Newton reciprocal sqrt，已压住多层爆值；后续仍需针对精度和通信轮数优化。
-5. C++ fixed-point reveal trace 与 Python reference 已建立第一轮对齐，当前正确性 baseline 使用逐元素 dot-product 矩阵乘。
-6. 原 `prepare_GEMM` 大矩阵路径需要单独缩小复现；当前端到端正确性 baseline 继续使用逐元素 dot-product 矩阵乘作为对齐 oracle。
+5. C++ fixed-point reveal trace 与 Python reference 已建立第一轮对齐，默认正确性 baseline 仍使用逐元素 dot-product 矩阵乘。
+6. `prepare_GEMM` 大矩阵爆值已通过 RHS layout adapter 修复；当前 `PPTI_MATMUL_BACKEND=1` 正确但 seq16 性能仍慢于 manual dot，需要缓存或预导出 GEMM layout 权重。
 
 ## 9. 下一步开发计划
 
 推荐下一步顺序：
 
-1. 单独构造 `prepare_GEMM` 大矩阵复现用例，定位 TinyBERT projection 爆值原因。
-2. 将 ReLU-GELU baseline 替换为更接近真实 GELU 的 piecewise / hard-GELU / lookup 方案。
+1. 将 ReLU-GELU baseline 替换为更接近真实 GELU 的 piecewise / hard-GELU / lookup 方案。
+2. 为 `PPTI_MATMUL_BACKEND=1` 增加 RHS layout 缓存或预导出，避免每次 matmul 动态重排。
 3. 继续校准 LayerNorm reciprocal sqrt、定点小数位和截断策略。
-4. 在 GEMM 路径稳定后扩展到 `seq=64/128`。
+4. 在 GEMM 性能路径稳定后扩展到 `seq=64/128`。
 5. 将 Softmax rational baseline 替换为更低通信的 range reduction / lookup 方案。
 
 ## 10. 当前阶段结论
@@ -414,9 +414,9 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 
 这个阶段证明了：
 
-- Transformer 的核心矩阵乘接口已经接入 HPMPC；当前正确性 baseline 先使用逐元素 dot-product，`prepare_GEMM` 大投影路径需继续定位。
+- Transformer 的核心矩阵乘接口已经接入 HPMPC；`prepare_GEMM` RHS layout adapter 已修复大投影爆值，默认仍保留逐元素 dot-product correctness baseline。
 - Attention Softmax 的插入位置和调用链已经明确。
 - Softmax 后路径 trace 已完成，FFN/GELU 与后续 LayerNorm 的 `1e14` 爆值已通过阶段 9 correctness baseline 压住。
 - LayerNorm、GELU、residual、FFN 可以在 HPMPC 算术分享层组合出来。
 - CPU 和 CUDA GEMM backend 均可运行。
-- 后续工作可以集中在 Softmax、GELU、LayerNorm 近似精度和通信优化，以及 `prepare_GEMM` 大矩阵路径修复上。
+- 后续工作可以集中在 Softmax、GELU、LayerNorm 近似精度和通信优化，以及 `prepare_GEMM` adapter 的布局缓存/性能优化上。

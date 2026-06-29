@@ -953,6 +953,78 @@ C++ final_output:    min=-2.044      max=4.337      mean_abs=0.2465803552
 - `seq=32` online time 从 `~6.52s` 增至 `~9.16s`。
 - P0 trace 日志仍可能先输出一组全零 trace，后续才是真实 reveal trace；对比时需要使用有效 trace。
 
+## 阶段 11：prepare_GEMM 大矩阵路径修复
+
+目标：修复 TinyBERT projection 走 `prepare_GEMM` 时的 `1e14` 级爆值，并保留 manual dot baseline 作为 correctness oracle。
+
+根因：
+
+```text
+TinyBERT 导出权重 layout: [inner, cols] row-major
+manual dot 访问方式:      rhs[k * cols + c]
+prepare_GEMM 访问方式:    B[c * inner + k]
+```
+
+因此，直接把 Transformer 的 RHS 传给 `prepare_GEMM` 时，GEMM 会按 `[cols, inner]` 读取 `[inner, cols]` 的权重，导致真实 Q/K/V projection 错位，进一步触发 `layer0_q_linear_stats ~= 5e14` 的错误。
+
+实现：
+
+```text
+PPTI_MATMUL_BACKEND=0: manual dot baseline, 默认路径
+PPTI_MATMUL_BACKEND=1: prepare_GEMM adapter
+```
+
+adapter 在调用 `prepare_GEMM` 前做一次 RHS layout 转换：
+
+```text
+rhs_for_gemm[c * inner + k] = rhs[k * cols + c]
+prepare_GEMM(lhs, rhs_for_gemm, out, rows, cols, inner, false)
+```
+
+正确性验证：
+
+```text
+smoke GEMM adapter vs Python fixed reference:
+embedding_out        max=0
+layer0_head0_scores  max=0.0001222656 mean=0.0000727783299
+layer0_head0_probs   max=0.000332422  mean=0.00010446175
+final_output         max=0.76280518   mean=0.275500872
+
+real seq=16 GEMM adapter vs Python fixed reference:
+layer0_q_linear_stats           max=0.00963574  mean=0.00625384667
+layer0_head0_score_scaled_stats max=0.0389966   mean=0.0261987267
+layer0_head0_probs              max=0.006285352 mean=0.000163028266
+layer0_out                      max=2.6417783   mean=0.2086785
+layer1_out                      max=5.4381221   mean=0.450146234
+layer2_out                      max=7.63491211  mean=0.71829986
+layer3_out                      max=2.25173633  mean=0.245499895
+final_output                    max=2.25173633  mean=0.245499895
+```
+
+性能验证：
+
+```text
+seq=16 manual dot CPU no-trace:
+getTime ~= 6.52s
+
+seq=16 prepare_GEMM adapter CPU no-trace:
+P0 getTime=7.306864s
+P1 getTime=7.308431s
+P2 getTime=7.307701s
+
+seq=16 prepare_GEMM adapter CUDA no-trace:
+P0 getTime=7.701905s
+P1 getTime=7.706207s
+P2 getTime=7.705598s
+```
+
+阶段判断：
+
+- `prepare_GEMM` 大矩阵爆值的直接原因已经定位并修复：不是权重文件错误，而是 RHS layout 不匹配。
+- `PPTI_MATMUL_BACKEND=1` 已可作为 HPMPC GEMM 正确性路径使用。
+- 当前 adapter 每次 matmul 都重排 RHS，且 seq16 形状下 CPU/CUDA GEMM adapter 都慢于 manual dot baseline；下一步性能优化应缓存或预导出 GEMM layout 权重，并减少小矩阵 CUDA 调用。
+- 默认仍保持 `PPTI_MATMUL_BACKEND=0`，避免影响已有 correctness/performance baseline。
+
 ## 提交流程
 
 每完成一个阶段：
@@ -973,16 +1045,16 @@ git push origin master
 
 ## 下一步执行建议
 
-下一步进入阶段 11：
+下一步进入阶段 12：
 
 ```text
-修复 prepare_GEMM 大矩阵路径，并开始替换 ReLU-GELU correctness baseline。
+GELU approximation 升级，并优化 GEMM adapter 的权重布局缓存。
 ```
 
 最小可交付结果：
 
 ```text
-prepare_GEMM vs manual dot 的最小复现
-定位 TinyBERT projection 爆值原因
-提出 GELU approximation 升级候选并选定一个实现
+用 hard-GELU/piecewise GELU 替换 ReLU baseline
+真实 seq=16/32 fixed trace 不爆值
+评估预转置/预导出 GEMM layout 对性能的影响
 ```

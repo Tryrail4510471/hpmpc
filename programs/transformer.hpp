@@ -57,6 +57,12 @@ constexpr int TRACE_ENABLED = 0;
 constexpr int TRACE_ENABLED = PPTI_TRACE;
 #endif
 
+#ifndef PPTI_MATMUL_BACKEND
+constexpr int MATMUL_BACKEND = 0;
+#else
+constexpr int MATMUL_BACKEND = PPTI_MATMUL_BACKEND;
+#endif
+
 static_assert(HIDDEN % NUM_HEADS == 0, "PPTI TinyBERT requires HIDDEN to be divisible by NUM_HEADS.");
 constexpr int HEAD_DIM = HIDDEN / NUM_HEADS;
 constexpr int LAYER_WEIGHT_STRIDE = 10000;
@@ -443,6 +449,18 @@ void secure_matmul(std::vector<A>& lhs,
                    int cols)
 {
     std::fill(out.begin(), out.end(), A(0));
+    if constexpr (MATMUL_BACKEND == 1)
+    {
+        std::vector<A> rhs_for_gemm(rhs.size());
+        for (int k = 0; k < inner; k++)
+            for (int c = 0; c < cols; c++)
+                rhs_for_gemm[c * inner + k] = rhs[k * cols + c];
+
+        prepare_GEMM(lhs.data(), rhs_for_gemm.data(), out.data(), rows, cols, inner, false);
+        complete_GEMM(out.data(), rows, cols);
+        return;
+    }
+
     for (int r = 0; r < rows; r++)
     {
         for (int c = 0; c < cols; c++)

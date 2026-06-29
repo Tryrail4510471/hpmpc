@@ -114,10 +114,11 @@ layer0_head0_score_scaled_stats manual dot  max=0.0389966 mean=0.0261987
 ```
 
 Interpretation: real embeddings and Q/K/V weights are aligned. The original
-`prepare_GEMM` path currently explodes on the large TinyBERT projection shape,
-while the manual dot-product baseline aligns projection and QK score statistics
-with the Python fixed-point reference. The first large divergence has therefore
-moved to attention Softmax:
+direct `prepare_GEMM` call exploded because Transformer exports weights in
+`[inner, cols]` row-major layout, while HPMPC GEMM reads the RHS as
+`[cols, inner]`. The manual dot-product baseline aligned projection and QK
+score statistics with the Python fixed-point reference, moving the first large
+divergence to attention Softmax:
 
 ```text
 layer0_head0_probs max=5.44014034e14 mean=5.42012114e13
@@ -214,6 +215,43 @@ does not accelerate this baseline at `seq=16`, because the path is still
 dominated by small/medium matrix shapes, comparison-heavy approximations, and
 the manual dot-product correctness oracle.
 
+Stage 11 adds a selectable HPMPC GEMM adapter:
+
+```text
+PPTI_MATMUL_BACKEND=0  manual dot baseline, default
+PPTI_MATMUL_BACKEND=1  prepare_GEMM adapter
+```
+
+The adapter converts RHS layout before calling GEMM:
+
+```text
+rhs_for_gemm[c * inner + k] = rhs[k * cols + c]
+prepare_GEMM(lhs, rhs_for_gemm, out, rows, cols, inner, false)
+```
+
+Real seq=16 GEMM adapter trace comparison:
+
+```text
+layer0_q_linear_stats           max=0.00963574  mean=0.00625384667
+layer0_head0_score_scaled_stats max=0.0389966   mean=0.0261987267
+layer0_head0_probs              max=0.006285352 mean=0.000163028266
+final_output                    max=2.25173633  mean=0.245499895
+```
+
+Stage 11 performance check:
+
+```text
+seq=16 manual dot CPU           getTime ~= 6.52s
+seq=16 prepare_GEMM adapter CPU getTime ~= 7.31s
+seq=16 prepare_GEMM adapter CUDA getTime ~= 7.70s
+```
+
+Interpretation: the large projection explosion is fixed by matching the RHS
+layout expected by `prepare_GEMM`. The adapter is correct, but not yet faster:
+it currently pays an RHS re-layout cost at every matmul and still uses many
+small/medium GEMM calls. The next optimization is to cache or pre-export GEMM
+layout weights and only use CUDA where the matrix shape is large enough.
+
 Synthetic model-file smoke test:
 
 ```sh
@@ -302,10 +340,10 @@ performance.
 
 The detailed execution checklist lives in `StudyNote/PPTI-TaskFlow.md`.
 
-1. Build a minimal `prepare_GEMM` vs manual dot-product repro for the
-   TinyBERT projection shape and isolate the large projection explosion.
-2. Replace the ReLU-GELU baseline with a calibrated approximation that stays
+1. Replace the ReLU-GELU baseline with a calibrated approximation that stays
    stable for real TinyBERT FFN pre-activations.
+2. Cache or pre-export GEMM-layout RHS weights so `PPTI_MATMUL_BACKEND=1`
+   does not re-layout every matmul.
 3. Further calibrate LayerNorm reciprocal sqrt and fixed-point precision.
 4. Replace the rational Softmax baseline with a lower-round lookup or
    range-reduction design.
