@@ -1382,3 +1382,77 @@ final_output       max=0.02520 mean=0.0064717668
 - `10/8` 能稳定减少通信量：P0 从 `33.18MB` 降到 `31.61MB`，P1/P2 从 `26.86MB` 降到 `25.29MB`。
 - seq32 final drift mean 为 `0.00647`，比 seq16 的 `0.00905` 更小，说明该候选在 seq32 上没有放大误差。
 - 结论：`10/8` 可作为“省通信、轻微扰动”的实验候选；默认仍保持 `12/8`。下一步优化应该转向 LayerNorm rsqrt iteration 扫描或 Softmax 结构性替换，而不是继续盲目减少 row_sum 轮数。
+
+## 阶段 17：LayerNorm rsqrt iteration 扫描
+
+目标：
+
+```text
+在 Stage 13 的 scale=256, init=1/128 稳定配置上减少 reciprocal sqrt Newton 轮数。
+评估 24 -> 23/22/20/16/12 是否能降低耗时，同时保持逐层 trace 稳定。
+```
+
+seq16 no-trace 性能扫描：
+
+```text
+24 iterations:
+P0 send=13.59MB  P1/P2 send=10.74MB  getTime ~= 7.08s
+
+20 iterations:
+P0 send=13.58MB  P1/P2 send=10.73MB  getTime ~= 7.02s
+
+16 iterations:
+P0 send=13.56MB  P1/P2 send=10.71MB  getTime ~= 7.78s
+
+12 iterations:
+P0 send=13.54MB  P1/P2 send=10.70MB  getTime ~= 8.04s
+
+23 iterations:
+P0 send=13.59MB  P1/P2 send=10.74MB  getTime ~= 6.65s
+
+22 iterations:
+P0 send=13.58MB  P1/P2 send=10.73MB  getTime ~= 7.40s
+```
+
+相对 24-iteration C++ trace baseline 的漂移：
+
+```text
+23 iterations:
+layer0_out   max=0.4002 mean=0.104171466
+final_output max=0.3674 mean=0.175488536
+
+22 iterations:
+layer0_out   max=0.8371 mean=0.224064377
+final_output max=0.6500 mean=0.269629275
+
+20 iterations:
+layer0_out   max=1.7506 mean=0.464294601
+final_output max=1.7332 mean=0.793736506
+
+16 iterations:
+layer0_out   max=1.6004 mean=0.665083359
+final_output max=1.8554 mean=0.908531132
+
+12 iterations:
+layer0_out   max=1.5717 mean=0.771270204
+final_output max=2.0093 mean=0.821134712
+```
+
+20-iteration 初值补偿实验：
+
+```text
+20 iterations, init=1/64:
+layer0_out   max=0.9646 mean=0.261143782
+final_output max=0.9200 mean=0.401008482
+
+20 iterations, init=1/256:
+layer0_out   max=1.7629 mean=0.648405579
+final_output max=1.6084 mean=0.875118692
+```
+
+阶段判断：
+
+- LayerNorm rsqrt 对迭代数极其敏感；即使只从 24 降到 23，第一层后输出已经明显漂移。
+- 20/16/12 虽然通信量略降，但数值误差不可接受，且 wall-clock time 不稳定，不具备默认优化价值。
+- 调整初值没有救回 20 轮，`1/64` 和 `1/256` 都比当前 `1/128` 更差。
+- 当前结论：`PPTI_LN_RSQRT_ITERATIONS=24` 继续作为稳定默认值。后续 LayerNorm 优化应改为结构性方案，例如分段/查表 rsqrt、公开尺度估计后的更好初值、或减少 LayerNorm 调用频率，而不是简单减少 Newton 轮数。

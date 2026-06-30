@@ -428,13 +428,14 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 7. Stage 14 尝试了两种 GEMM RHS layout cache：加载后复制长期 cache、直接按 GEMM layout 接收权重；两者都会在 P1/P2 触发 `double free or corruption`，因此已恢复稳定实现。
 8. Stage 15 已将 attention Softmax reciprocal Newton 轮数参数化；默认仍为 `12/8`，当前推荐通信优化候选为 `10/8`。
 9. Stage 16 已在 seq32 上复验 `10/8`：通信量下降但 wall-clock time 基本不变，final trace drift mean 约 `0.00647`。
+10. Stage 17 已扫描 LayerNorm rsqrt 迭代数；23/22/20/16/12 轮都会造成明显输出漂移，默认必须保持 24 轮。
 
 ## 9. 下一步开发计划
 
 推荐下一步顺序：
 
 1. 将 Softmax rational baseline 替换为更低通信的 range reduction / lookup 方案。
-2. 在 LayerNorm `scale=256` 稳定 baseline 上测试更少 rsqrt Newton iteration，评估速度/误差折中。
+2. 设计结构性 LayerNorm rsqrt 优化，例如分段/查表 rsqrt 或公开尺度估计后的更好初值。
 3. 使用 `PPTI_SOFTMAX_EXP_ITERATIONS=10 PPTI_SOFTMAX_ROWSUM_ITERATIONS=8` 跑更多输入样本，判断该通信优化候选是否可作为默认。
 4. 重新设计 GEMM-only 权重导出/加载路径，单独验证 `prepare_GEMM` RHS share 生命周期，再考虑作为加速路径。
 5. 在 Softmax 或 matmul 加速路径稳定后扩展到 `seq=64/128`。
@@ -452,4 +453,5 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 - CPU 和 CUDA GEMM backend 均可运行。
 - `seq=32` 已复验 LayerNorm scale=256：`final_output mean error=0.00272`，CPU no-trace 约 `9.48s`。
 - Softmax `10/8` 候选在 seq16 上约 `6.82s`，相对 `12/8` baseline 的 final trace drift mean 约 `0.00905`；seq32 上通信下降但时间约 `10.79s`，final drift mean 约 `0.00647`。
+- LayerNorm rsqrt 简单减轮不可行：23 轮 final drift mean 已到 `0.175`，20 轮到 `0.794`，因此默认保持 24 轮。
 - 后续工作应集中在 Softmax、LayerNorm 近似精度和通信优化；GEMM layout cache 暂时列为风险项，不作为默认下一步。

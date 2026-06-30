@@ -499,3 +499,38 @@ communication, but it does not improve wall-clock time on the current CPU path.
 The next optimization should therefore scan LayerNorm rsqrt iterations or move
 to a structural Softmax replacement instead of only reducing row-sum Newton
 rounds.
+
+## Stage 17 LayerNorm Rsqrt Scan
+
+LayerNorm reciprocal-sqrt iterations were scanned at `seq=16` with the
+calibrated `scale=256, init=1/128` baseline:
+
+```text
+24 iterations: seq16 CPU ~= 7.08s
+20 iterations: seq16 CPU ~= 7.02s
+16 iterations: seq16 CPU ~= 7.78s
+12 iterations: seq16 CPU ~= 8.04s
+```
+
+Trace drift against the 24-iteration C++ baseline:
+
+```text
+23 iterations final_output max=0.3674 mean=0.175488536
+22 iterations final_output max=0.6500 mean=0.269629275
+20 iterations final_output max=1.7332 mean=0.793736506
+16 iterations final_output max=1.8554 mean=0.908531132
+12 iterations final_output max=2.0093 mean=0.821134712
+```
+
+Changing the 20-iteration initial guess did not recover accuracy:
+
+```text
+20 iterations, init=1/64  final_output mean=0.401008482
+20 iterations, init=1/256 final_output mean=0.875118692
+```
+
+Interpretation: the current fixed-point LayerNorm rsqrt requires the full
+24 Newton iterations for numerical stability. Reducing iterations is not a safe
+optimization. Future LayerNorm work should use a structural approach such as a
+piecewise/lookup rsqrt, a stronger public-scale initial guess, or fewer
+LayerNorm invocations.
