@@ -415,11 +415,35 @@ performance.
 
 The detailed execution checklist lives in `StudyNote/PPTI-TaskFlow.md`.
 
-1. Re-run `seq=32` fixed trace with the calibrated LayerNorm defaults.
-2. Cache or pre-export GEMM-layout RHS weights so `PPTI_MATMUL_BACKEND=1`
-   does not re-layout every matmul.
-3. Replace the rational Softmax baseline with a lower-round lookup or
+1. Replace the rational Softmax baseline with a lower-round lookup or
    range-reduction design.
-4. Scale to `seq=64/128` after the GEMM path has a stable accelerated option.
+2. Reduce LayerNorm cost by testing smaller Newton iteration counts after the
+   `scale=256` calibration.
+3. Revisit GEMM acceleration with a dedicated pre-exported layout format rather
+   than long-lived copied share objects.
+4. Scale to `seq=64/128` after a stable accelerated matmul or Softmax path lands.
 5. Scale constants from smoke dimensions to TinyBERT dimensions, then benchmark
    CPU and CUDA paths separately.
+
+## Stage 14 Optimization Note
+
+The calibrated LayerNorm defaults were revalidated at `seq=32`:
+
+```text
+final_output max=0.069527051 mean=0.00272162649
+seq32 CPU getTime ~= 9.48s
+P0 send=33.18MB, P1/P2 send=26.86MB
+```
+
+Two GEMM RHS layout cache variants were tested and rejected for now:
+
+```text
+copied long-lived RHS layout cache -> P1/P2 double free or corruption
+direct GEMM-layout weight loading  -> P1/P2 double free or corruption
+```
+
+The stable code path was restored. The current working assumption is that
+`prepare_GEMM` has lifecycle assumptions for RHS share objects that make a naive
+long-lived TinyBERT weight cache unsafe. Future GEMM work should use a dedicated
+export/load path and validate share ownership independently before measuring
+performance.

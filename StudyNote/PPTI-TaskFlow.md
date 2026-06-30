@@ -1203,3 +1203,62 @@ git push origin master
 seq32 fixed trace 使用 LN scale=256 复验
 评估预转置/预导出 GEMM layout 对性能的影响
 ```
+
+## 阶段 14：seq32 复验与 GEMM layout cache 评估
+
+目标：
+
+```text
+确认 Stage 13 的 LayerNorm 默认参数能推广到 seq=32。
+评估是否可以通过缓存/预加载 GEMM RHS layout 加速 PPTI_MATMUL_BACKEND=1。
+```
+
+seq32 trace 复验结果：
+
+```text
+layer0_head0_probs max=0.005459473 mean=0.000100898513
+layer0_out         max=0.369475590 mean=0.018789278400
+layer1_out         max=0.202377340 mean=0.007456045940
+layer2_out         max=0.056631055 mean=0.005591327830
+layer3_out         max=0.069527051 mean=0.002721626490
+final_output       max=0.069527051 mean=0.002721626490
+```
+
+seq32 no-trace 性能：
+
+```text
+P0 send=33.18MB / 0.000008MB  getTime=9.483334s
+P1 send=0MB / 26.86MB         getTime=9.478727s
+P2 send=26.86MB / 0.000008MB  getTime=9.480891s
+```
+
+结论：
+
+- `LN_CENTERED_SCALE=256, RSQRT_ITERATIONS=24, INIT=1/128` 在 seq32 上继续稳定。
+- seq32 的 final fixed-reference mean error 为 `0.00272`，与 seq16 的 `0.00279` 同一量级。
+- 通信量从 seq16 的 P0 `13.59MB` 增加到 seq32 的 P0 `33.18MB`，符合 attention/FFN 规模增长预期。
+
+GEMM layout cache 实验：
+
+```text
+方案 A：加载后复制一份 GEMM RHS layout cache。
+结果：P1/P2 double free or corruption，P0 残留等待。
+
+方案 B：PPTI_MATMUL_BACKEND=1 时直接按 GEMM RHS layout 接收权重。
+结果：仍触发 P1/P2 double free or corruption。
+```
+
+判断：
+
+- 当前 `prepare_GEMM` 路径对 RHS share 对象的生命周期/释放有额外假设，不能简单把真实 TinyBERT 权重改成长生命周期 cache。
+- 已恢复到稳定实现：`PPTI_MATMUL_BACKEND=1` 保留原始临时 RHS layout adapter，默认 correctness baseline 仍使用 manual dot。
+- Stage 14 的优化结论是“缓存权重 layout 不是当前可安全落地的加速点”。下一步应优先做 Softmax 低通信近似、LayerNorm round/scale 简化，或从导出格式层面设计专门的 GEMM-only 权重文件并单独验证 share 对象生命周期。
+
+恢复后稳定性验证：
+
+```text
+seq16 CPU manual dot no-trace:
+P0 send=13.59MB / 0.000008MB  getTime=8.595128s
+P1 send=0MB / 10.74MB         getTime=8.592344s
+P2 send=10.74MB / 0.000008MB  getTime=8.592262s
+```

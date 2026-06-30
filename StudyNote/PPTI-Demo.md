@@ -424,16 +424,17 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 3. GELU 已从 ReLU correctness baseline 升级为 tuned hard-GELU，解决 cubic 爆炸的同时更接近 true GELU。
 4. LayerNorm 使用带 centered scaling 的 Newton reciprocal sqrt；当前默认 `scale=256, init=1/128` 已把 seq16 final fixed trace mean error 降到 `0.00279`。
 5. C++ fixed-point reveal trace 与 Python reference 已建立第一轮对齐，默认正确性 baseline 仍使用逐元素 dot-product 矩阵乘。
-6. `prepare_GEMM` 大矩阵爆值已通过 RHS layout adapter 修复；当前 `PPTI_MATMUL_BACKEND=1` 正确但 seq16 性能仍慢于 manual dot，需要缓存或预导出 GEMM layout 权重。
+6. `prepare_GEMM` 大矩阵爆值已通过 RHS layout adapter 修复；当前 `PPTI_MATMUL_BACKEND=1` 正确但 seq16 性能仍慢于 manual dot。
+7. Stage 14 尝试了两种 GEMM RHS layout cache：加载后复制长期 cache、直接按 GEMM layout 接收权重；两者都会在 P1/P2 触发 `double free or corruption`，因此已恢复稳定实现。
 
 ## 9. 下一步开发计划
 
 推荐下一步顺序：
 
-1. 在 `seq=32` 上复验 tuned hard-GELU + LayerNorm scale=256 默认配置。
-2. 为 `PPTI_MATMUL_BACKEND=1` 增加 RHS layout 缓存或预导出，避免每次 matmul 动态重排。
-3. 在 GEMM 性能路径稳定后扩展到 `seq=64/128`。
-4. 将 Softmax rational baseline 替换为更低通信的 range reduction / lookup 方案。
+1. 将 Softmax rational baseline 替换为更低通信的 range reduction / lookup 方案。
+2. 在 LayerNorm `scale=256` 稳定 baseline 上测试更少 rsqrt Newton iteration，评估速度/误差折中。
+3. 重新设计 GEMM-only 权重导出/加载路径，单独验证 `prepare_GEMM` RHS share 生命周期，再考虑作为加速路径。
+4. 在 Softmax 或 matmul 加速路径稳定后扩展到 `seq=64/128`。
 
 ## 10. 当前阶段结论
 
@@ -446,4 +447,5 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 - Softmax 后路径 trace 已完成，FFN/GELU 与后续 LayerNorm 的 `1e14` 爆值已压住；GELU 已升级为 tuned hard-GELU。
 - LayerNorm、GELU、residual、FFN 可以在 HPMPC 算术分享层组合出来。
 - CPU 和 CUDA GEMM backend 均可运行。
-- 后续工作可以集中在 Softmax、GELU、LayerNorm 近似精度和通信优化，以及 `prepare_GEMM` adapter 的布局缓存/性能优化上。
+- `seq=32` 已复验 LayerNorm scale=256：`final_output mean error=0.00272`，CPU no-trace 约 `9.48s`。
+- 后续工作应集中在 Softmax、LayerNorm 近似精度和通信优化；GEMM layout cache 暂时列为风险项，不作为默认下一步。
