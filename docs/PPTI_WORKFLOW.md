@@ -447,3 +447,32 @@ The stable code path was restored. The current working assumption is that
 long-lived TinyBERT weight cache unsafe. Future GEMM work should use a dedicated
 export/load path and validate share ownership independently before measuring
 performance.
+
+## Stage 15 Softmax Iteration Tuning
+
+The rational attention Softmax now exposes its Newton reciprocal iteration
+counts as compile-time/reference parameters:
+
+```text
+PPTI_SOFTMAX_EXP_ITERATIONS
+PPTI_SOFTMAX_ROWSUM_ITERATIONS
+```
+
+Defaults remain `12/8` to preserve the current accuracy baseline. The best
+measured performance candidate so far is `10/8`:
+
+```text
+12/8 baseline:  seq16 CPU ~= 8.59s, P0 send=13.59MB, P1/P2 send=10.74MB
+10/8 candidate: seq16 CPU ~= 6.82s, P0 send=13.20MB, P1/P2 send=10.35MB
+```
+
+Trace drift against the C++ `12/8` baseline:
+
+```text
+10/8 final_output max=0.01910 mean=0.00904820
+8/6  final_output max=0.13360 mean=0.04562570
+```
+
+Recommendation: keep `12/8` as default and use `10/8` as the current explicit
+speed candidate. More aggressive settings such as `8/6` are faster but move the
+multi-layer output too far for the current TinyBERT accuracy target.

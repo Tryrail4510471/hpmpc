@@ -1262,3 +1262,82 @@ P0 send=13.59MB / 0.000008MB  getTime=8.595128s
 P1 send=0MB / 10.74MB         getTime=8.592344s
 P2 send=10.74MB / 0.000008MB  getTime=8.592262s
 ```
+
+## 阶段 15：Softmax Newton 轮数参数化与候选扫描
+
+目标：
+
+```text
+降低 attention Softmax rational baseline 的 reciprocal Newton 轮数。
+保留 12/8 作为默认精度 baseline，同时允许通过编译参数扫描速度/误差折中。
+```
+
+新增参数：
+
+```text
+PPTI_SOFTMAX_EXP_ITERATIONS
+PPTI_SOFTMAX_ROWSUM_ITERATIONS
+```
+
+默认值保持：
+
+```text
+exp reciprocal iterations    = 12
+row_sum reciprocal iterations = 8
+```
+
+对应实现：
+
+```text
+programs/transformer.hpp
+scripts/ppti_reference.py
+Makefile CONFIG_OPTIONS
+```
+
+seq16 no-trace 性能扫描：
+
+```text
+12/8 baseline:
+P0 send=13.59MB  P1/P2 send=10.74MB  getTime ~= 8.59s
+
+10/8 candidate:
+P0 send=13.20MB  P1/P2 send=10.35MB  getTime ~= 6.82s
+
+10/6 candidate:
+P0 send=13.17MB  P1/P2 send=10.32MB  getTime ~= 7.28s
+
+8/6 candidate:
+P0 send=12.78MB  P1/P2 send=9.928MB  getTime ~= 6.23s
+```
+
+相对 12/8 C++ trace baseline 的漂移：
+
+```text
+10/8:
+layer0_head0_probs max=0.00110 mean=0.000195586
+final_output       max=0.01910 mean=0.00904820
+
+10/6:
+layer0_head0_probs max=0.00110 mean=0.000196445
+final_output       max=0.10020 mean=0.03078600
+
+8/6:
+layer0_head0_probs max=0.00171 mean=0.000306172
+final_output       max=0.13360 mean=0.04562570
+```
+
+阶段判断：
+
+- `10/8` 是当前最稳妥的性能候选：速度明显改善，final drift 仍在 `~0.009` 量级。
+- `8/6` 速度最快，但端到端漂移偏大，暂不建议作为默认。
+- `10/6` 没有体现稳定收益，row_sum reciprocal 减轮对多层输出扰动更大。
+- 代码默认值仍保持 `12/8`，避免无意降低当前精度 baseline。性能实验可显式传入 `PPTI_SOFTMAX_EXP_ITERATIONS=10 PPTI_SOFTMAX_ROWSUM_ITERATIONS=8`。
+
+示例命令：
+
+```sh
+make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRACTIONAL=14 \
+  USE_CUDA_GEMM=0 PPTI_TRACE=0 \
+  PPTI_SEQ_LEN=16 PPTI_HIDDEN=312 PPTI_NUM_HEADS=12 PPTI_NUM_LAYERS=4 PPTI_FFN_HIDDEN=1200 \
+  PPTI_SOFTMAX_EXP_ITERATIONS=10 PPTI_SOFTMAX_ROWSUM_ITERATIONS=8
+```

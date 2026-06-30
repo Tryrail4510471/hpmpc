@@ -81,6 +81,18 @@ constexpr float LN_RSQRT_INITIAL_GUESS = 1.0f / 128.0f;
 constexpr float LN_RSQRT_INITIAL_GUESS = PPTI_LN_RSQRT_INITIAL_GUESS;
 #endif
 
+#ifndef PPTI_SOFTMAX_EXP_ITERATIONS
+constexpr int SOFTMAX_EXP_ITERATIONS = 12;
+#else
+constexpr int SOFTMAX_EXP_ITERATIONS = PPTI_SOFTMAX_EXP_ITERATIONS;
+#endif
+
+#ifndef PPTI_SOFTMAX_ROWSUM_ITERATIONS
+constexpr int SOFTMAX_ROWSUM_ITERATIONS = 8;
+#else
+constexpr int SOFTMAX_ROWSUM_ITERATIONS = PPTI_SOFTMAX_ROWSUM_ITERATIONS;
+#endif
+
 static_assert(HIDDEN % NUM_HEADS == 0, "PPTI TinyBERT requires HIDDEN to be divisible by NUM_HEADS.");
 constexpr int HEAD_DIM = HIDDEN / NUM_HEADS;
 constexpr int LAYER_WEIGHT_STRIDE = 10000;
@@ -857,7 +869,7 @@ void secure_rowwise_softmax_poly(std::vector<A>& scores, int rows, int cols, con
     for (int i = 0; i < static_cast<int>(scores.size()); i++)
         exp_denom[i] = A(fixed(1.0f)) - scores[i] + squared[i];
 
-    reciprocal_newton(exp_denom, scores, 12, 1.0f / 1024.0f);
+    reciprocal_newton(exp_denom, scores, SOFTMAX_EXP_ITERATIONS, 1.0f / 1024.0f);
 
     for (int r = 0; r < rows; r++)
     {
@@ -878,7 +890,7 @@ void secure_rowwise_softmax_poly(std::vector<A>& scores, int rows, int cols, con
             row_sum[r] += scores[r * cols + c];
 
     std::vector<A> inv_sum;
-    reciprocal_newton(row_sum, inv_sum, 8, 1.0f / static_cast<float>(cols));
+    reciprocal_newton(row_sum, inv_sum, SOFTMAX_ROWSUM_ITERATIONS, 1.0f / static_cast<float>(cols));
 
     for (int r = 0; r < rows; r++)
     {

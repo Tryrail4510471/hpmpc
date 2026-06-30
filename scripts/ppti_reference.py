@@ -38,6 +38,8 @@ class Config:
     ln_centered_scale: float = 256.0
     ln_rsqrt_iterations: int = 24
     ln_rsqrt_initial_guess: float = 1.0 / 128.0
+    softmax_exp_iterations: int = 12
+    softmax_rowsum_iterations: int = 8
 
     @property
     def head_dim(self) -> int:
@@ -327,10 +329,10 @@ def softmax_poly(scores: Matrix, attention_mask: list[int], cfg: Config) -> Matr
         squared = [q_mul(x, x, cfg) for x in shifted]
         squared = [q_mul(x, 0.5, cfg) for x in squared]
         exp_denom = [q_add(q_sub(q(1.0, cfg), x, cfg), sq, cfg) for x, sq in zip(shifted, squared)]
-        exp_approx = reciprocal_newton(exp_denom, 12, 1.0 / 1024.0, cfg)
+        exp_approx = reciprocal_newton(exp_denom, cfg.softmax_exp_iterations, 1.0 / 1024.0, cfg)
         exp_approx = [q_mul(x, 1.0 if attention_mask[i] != 0 else 0.0, cfg) for i, x in enumerate(exp_approx)]
         denom = q_sum(exp_approx, cfg)
-        inv_sum = reciprocal_newton([denom], 8, 1.0 / len(row), cfg)[0]
+        inv_sum = reciprocal_newton([denom], cfg.softmax_rowsum_iterations, 1.0 / len(row), cfg)[0]
         out.append([q_mul(x, inv_sum, cfg) for x in exp_approx])
     return out
 
@@ -545,6 +547,8 @@ def main() -> None:
     parser.add_argument("--ln-centered-scale", type=float, default=256.0)
     parser.add_argument("--ln-rsqrt-iterations", type=int, default=24)
     parser.add_argument("--ln-rsqrt-initial-guess", type=float, default=1.0 / 128.0)
+    parser.add_argument("--softmax-exp-iterations", type=int, default=12)
+    parser.add_argument("--softmax-rowsum-iterations", type=int, default=8)
     parser.add_argument("--fixed", action="store_true", help="Emulate fixed-point truncation after MPC multiply steps.")
     parser.add_argument("--dump", action="store_true", help="Print intermediate matrices.")
     parser.add_argument("--trace", action="store_true", help="Print machine-readable PPTI_TRACE lines.")
@@ -561,6 +565,8 @@ def main() -> None:
         args.ln_centered_scale,
         args.ln_rsqrt_iterations,
         args.ln_rsqrt_initial_guess,
+        args.softmax_exp_iterations,
+        args.softmax_rowsum_iterations,
     )
     if cfg.hidden % cfg.heads != 0:
         raise SystemExit("--hidden must be divisible by --heads.")
