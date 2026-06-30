@@ -287,6 +287,46 @@ extra communication because it adds clamp comparisons and one multiplication.
 The final fixed-reference error is higher than the ReLU baseline, so the next
 step is LayerNorm/fixed-point calibration rather than more GELU changes alone.
 
+Stage 13 calibrates LayerNorm/fixed-point parameters and makes them configurable:
+
+```text
+PPTI_LN_CENTERED_SCALE
+PPTI_LN_RSQRT_ITERATIONS
+PPTI_LN_RSQRT_INITIAL_GUESS
+```
+
+Current default:
+
+```text
+PPTI_LN_CENTERED_SCALE=256
+PPTI_LN_RSQRT_ITERATIONS=24
+PPTI_LN_RSQRT_INITIAL_GUESS=1/128
+```
+
+Real seq=16 fixed trace after calibration:
+
+```text
+layer0_head0_probs max=0.006285352 mean=0.000163028266
+layer0_out         max=0.184137012 mean=0.0117048779
+layer1_out         max=0.123886426 mean=0.00582938099
+layer2_out         max=0.056611133 mean=0.00545621854
+layer3_out         max=0.070651855 mean=0.00279345366
+final_output       max=0.070651855 mean=0.00279345366
+```
+
+No-trace seq=16 CPU after calibration:
+
+```text
+getTime ~= 7.09s
+P0 send=13.59MB
+P1/P2 send=10.74MB
+```
+
+Interpretation: LayerNorm scaling was the main source of tuned hard-GELU fixed
+trace mismatch. Increasing the centered scaling from `128` to `256` and using
+`1/128` as the rsqrt initial guess reduces final mean error from `0.3177` to
+`0.00279` without changing the protocol structure.
+
 Synthetic model-file smoke test:
 
 ```sh
@@ -375,8 +415,7 @@ performance.
 
 The detailed execution checklist lives in `StudyNote/PPTI-TaskFlow.md`.
 
-1. Calibrate LayerNorm reciprocal sqrt and fixed-point precision for the tuned
-   hard-GELU path.
+1. Re-run `seq=32` fixed trace with the calibrated LayerNorm defaults.
 2. Cache or pre-export GEMM-layout RHS weights so `PPTI_MATMUL_BACKEND=1`
    does not re-layout every matmul.
 3. Replace the rational Softmax baseline with a lower-round lookup or

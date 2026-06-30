@@ -1095,6 +1095,82 @@ P2 send=10.74MB / 0.000008MB  getTime=6.746765s
 - 速度从 ReLU baseline 的 `~6.52s` 变为 `~6.75s`，通信量增加，原因是 hard-GELU 多了 clamp 比较和一次乘法。
 - 后续需要配合 LayerNorm/fixed-point 校准，不能只替换 GELU。
 
+## 阶段 13：LayerNorm / fixed-point 参数校准
+
+目标：降低 tuned hard-GELU 路径下的 C++ fixed trace vs Python fixed reference 误差，并保持 attention/FFN 逐层稳定。
+
+实现：
+
+- C++ 新增可配置 LayerNorm 参数：
+
+```text
+PPTI_LN_CENTERED_SCALE
+PPTI_LN_RSQRT_ITERATIONS
+PPTI_LN_RSQRT_INITIAL_GUESS
+```
+
+- Python reference 同步新增：
+
+```text
+--ln-centered-scale
+--ln-rsqrt-iterations
+--ln-rsqrt-initial-guess
+```
+
+- Makefile `CONFIG_OPTIONS` 已加入 `PPTI_MATMUL_BACKEND` 和 `PPTI_LN_*`，后续扫参应使用正常 make 变量，不再用 `MACRO_FLAGS` 临时覆盖，否则容易绕过 HPMPC 配置更新机制。
+
+候选结果：
+
+```text
+baseline tuned hard-GELU:
+LN centered_scale=128
+rsqrt_iterations=24
+rsqrt_initial_guess=1/64
+final_output max=2.25368652 mean=0.317721248
+seq16 CPU getTime ~= 6.75s
+
+candidate scale=64, init=1/32:
+final_output max=4144999.53 mean=1084967.15
+结论：淘汰，LayerNorm/rsqrt 失稳。
+
+candidate scale=256, init=1/128:
+layer0_head0_probs                 max=0.006285352 mean=0.000163028266
+layer0_attn_residual_post_ln_stats max=0.01136182  mean=0.00764328367
+layer0_ffn_hidden_linear_stats     max=0.0903931   mean=0.0551504367
+layer0_ffn_hidden_gelu_stats       max=0.0587041   mean=0.0197157167
+layer0_ffn_out_stats               max=5.320972    mean=1.79608625
+layer0_ffn_residual_post_ln_stats  max=0.0702319   mean=0.0287691723
+layer0_out                         max=0.184137012 mean=0.0117048779
+layer1_out                         max=0.123886426 mean=0.00582938099
+layer2_out                         max=0.056611133 mean=0.00545621854
+layer3_out                         max=0.070651855 mean=0.00279345366
+final_output                       max=0.070651855 mean=0.00279345366
+```
+
+正式默认值更新：
+
+```text
+PPTI_LN_CENTERED_SCALE=256.0f
+PPTI_LN_RSQRT_ITERATIONS=24
+PPTI_LN_RSQRT_INITIAL_GUESS=1/128
+```
+
+性能：
+
+```text
+seq16 CPU no-trace, tuned hard-GELU + LN scale=256:
+P0 send=13.59MB / 0.000008MB  getTime=7.087780s
+P1 send=0MB / 10.74MB         getTime=7.086622s
+P2 send=10.74MB / 0.000008MB  getTime=7.085820s
+```
+
+阶段判断：
+
+- `scale=256, init=1/128` 是当前最优 LayerNorm/fixed-point baseline。
+- final fixed-reference mean error 从 `0.3177` 降到 `0.00279`，并且 attention Softmax 误差保持在 Stage 12 水平。
+- 通信量不变，耗时约从 `6.75s` 增到 `7.09s`，属于可接受范围。
+- 下一步应在 `seq=32` 上复验该默认配置，再进入 GEMM layout 缓存和 Softmax 低通信优化。
+
 ## 提交流程
 
 每完成一个阶段：
@@ -1115,16 +1191,15 @@ git push origin master
 
 ## 下一步执行建议
 
-下一步进入阶段 13：
+下一步进入阶段 14：
 
 ```text
-LayerNorm/fixed-point 校准，并优化 GEMM adapter 的权重布局缓存。
+复验 seq=32，并优化 GEMM adapter 的权重布局缓存。
 ```
 
 最小可交付结果：
 
 ```text
-调 FRACTIONAL / centered_scale / rsqrt_iterations
-降低 tuned hard-GELU 下 final_output fixed trace 误差
+seq32 fixed trace 使用 LN scale=256 复验
 评估预转置/预导出 GEMM layout 对性能的影响
 ```

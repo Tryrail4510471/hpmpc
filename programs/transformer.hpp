@@ -63,6 +63,24 @@ constexpr int MATMUL_BACKEND = 0;
 constexpr int MATMUL_BACKEND = PPTI_MATMUL_BACKEND;
 #endif
 
+#ifndef PPTI_LN_CENTERED_SCALE
+constexpr float LN_CENTERED_SCALE = 256.0f;
+#else
+constexpr float LN_CENTERED_SCALE = PPTI_LN_CENTERED_SCALE;
+#endif
+
+#ifndef PPTI_LN_RSQRT_ITERATIONS
+constexpr int LN_RSQRT_ITERATIONS = 24;
+#else
+constexpr int LN_RSQRT_ITERATIONS = PPTI_LN_RSQRT_ITERATIONS;
+#endif
+
+#ifndef PPTI_LN_RSQRT_INITIAL_GUESS
+constexpr float LN_RSQRT_INITIAL_GUESS = 1.0f / 128.0f;
+#else
+constexpr float LN_RSQRT_INITIAL_GUESS = PPTI_LN_RSQRT_INITIAL_GUESS;
+#endif
+
 static_assert(HIDDEN % NUM_HEADS == 0, "PPTI TinyBERT requires HIDDEN to be divisible by NUM_HEADS.");
 constexpr int HEAD_DIM = HIDDEN / NUM_HEADS;
 constexpr int LAYER_WEIGHT_STRIDE = 10000;
@@ -995,7 +1013,14 @@ void secure_tinybert_encoder_layer(std::vector<A>& hidden, int layer)
     for (int i = 0; i < static_cast<int>(hidden.size()); i++)
         attn_residual[i] = hidden[i] + attn_out[i];
     trace_layer_stats(layer, "attn_residual_pre_ln_stats", attn_residual);
-    secure_rowwise_layer_norm(attn_residual, attn_gamma, attn_beta, SEQ_LEN, HIDDEN, 128.0f, 24, 1.0f / 64.0f);
+    secure_rowwise_layer_norm(attn_residual,
+                              attn_gamma,
+                              attn_beta,
+                              SEQ_LEN,
+                              HIDDEN,
+                              LN_CENTERED_SCALE,
+                              LN_RSQRT_ITERATIONS,
+                              LN_RSQRT_INITIAL_GUESS);
     trace_layer_stats(layer, "attn_residual_post_ln_stats", attn_residual);
 
     std::vector<A> ffn_hidden(SEQ_LEN * FFN_HIDDEN), ffn_out(SEQ_LEN * HIDDEN);
@@ -1011,7 +1036,14 @@ void secure_tinybert_encoder_layer(std::vector<A>& hidden, int layer)
     for (int i = 0; i < static_cast<int>(hidden.size()); i++)
         hidden[i] = attn_residual[i] + ffn_out[i];
     trace_layer_stats(layer, "ffn_residual_pre_ln_stats", hidden);
-    secure_rowwise_layer_norm(hidden, ffn_gamma, ffn_beta, SEQ_LEN, HIDDEN, 128.0f, 24, 1.0f / 64.0f);
+    secure_rowwise_layer_norm(hidden,
+                              ffn_gamma,
+                              ffn_beta,
+                              SEQ_LEN,
+                              HIDDEN,
+                              LN_CENTERED_SCALE,
+                              LN_RSQRT_ITERATIONS,
+                              LN_RSQRT_INITIAL_GUESS);
     trace_layer_stats(layer, "ffn_residual_post_ln_stats", hidden);
 
     if (layer == 0)

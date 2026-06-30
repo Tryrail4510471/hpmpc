@@ -390,6 +390,21 @@ final_output max=2.25368652 mean=0.317721248
 seq=16 CPU getTime ~= 6.75s
 ```
 
+阶段十三完成 LayerNorm/fixed-point 校准，将默认 LayerNorm 参数更新为：
+
+```text
+PPTI_LN_CENTERED_SCALE=256
+PPTI_LN_RSQRT_ITERATIONS=24
+PPTI_LN_RSQRT_INITIAL_GUESS=1/128
+```
+
+真实 `seq=16` tuned hard-GELU fixed trace 明显改善：
+
+```text
+final_output max=0.070651855 mean=0.00279345366
+seq=16 CPU getTime ~= 7.09s
+```
+
 当前代码支持通过 `MACRO_FLAGS` 切换形状。例如真实 TinyBERT-like 形状可尝试：
 
 ```sh
@@ -406,8 +421,8 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 
 1. 真实 TinyBERT encoder 权重、embedding 权重和 tokenizer input 路径已经接入。
 2. Attention mask 已接入，Softmax rational baseline 已压住概率爆值；它仍是正确性 baseline，不是最终低通信实现。
-3. GELU 已从 ReLU correctness baseline 升级为 tuned hard-GELU，解决 cubic 爆炸的同时更接近 true GELU；仍需结合 LayerNorm/fixed-point 校准。
-4. LayerNorm 使用带 centered scaling 的 Newton reciprocal sqrt，已压住多层爆值；后续仍需针对精度和通信轮数优化。
+3. GELU 已从 ReLU correctness baseline 升级为 tuned hard-GELU，解决 cubic 爆炸的同时更接近 true GELU。
+4. LayerNorm 使用带 centered scaling 的 Newton reciprocal sqrt；当前默认 `scale=256, init=1/128` 已把 seq16 final fixed trace mean error 降到 `0.00279`。
 5. C++ fixed-point reveal trace 与 Python reference 已建立第一轮对齐，默认正确性 baseline 仍使用逐元素 dot-product 矩阵乘。
 6. `prepare_GEMM` 大矩阵爆值已通过 RHS layout adapter 修复；当前 `PPTI_MATMUL_BACKEND=1` 正确但 seq16 性能仍慢于 manual dot，需要缓存或预导出 GEMM layout 权重。
 
@@ -415,7 +430,7 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
 
 推荐下一步顺序：
 
-1. 校准 tuned hard-GELU 路径下的 LayerNorm reciprocal sqrt、定点小数位和截断策略。
+1. 在 `seq=32` 上复验 tuned hard-GELU + LayerNorm scale=256 默认配置。
 2. 为 `PPTI_MATMUL_BACKEND=1` 增加 RHS layout 缓存或预导出，避免每次 matmul 动态重排。
 3. 在 GEMM 性能路径稳定后扩展到 `seq=64/128`。
 4. 将 Softmax rational baseline 替换为更低通信的 range reduction / lookup 方案。

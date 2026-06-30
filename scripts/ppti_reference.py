@@ -35,6 +35,9 @@ class Config:
     ffn_hidden: int
     fractional: int
     fixed: bool
+    ln_centered_scale: float = 256.0
+    ln_rsqrt_iterations: int = 24
+    ln_rsqrt_initial_guess: float = 1.0 / 128.0
 
     @property
     def head_dim(self) -> int:
@@ -467,7 +470,15 @@ def encoder_layer(
 
     attn_residual_pre_ln = add(hidden, attn_out, cfg)
     traces[f"layer{layer}_attn_residual_pre_ln_stats"] = matrix_stats(attn_residual_pre_ln)
-    attn_residual = layer_norm(attn_residual_pre_ln, attn_gamma, attn_beta, cfg, 128.0, 24, 1.0 / 64.0)
+    attn_residual = layer_norm(
+        attn_residual_pre_ln,
+        attn_gamma,
+        attn_beta,
+        cfg,
+        cfg.ln_centered_scale,
+        cfg.ln_rsqrt_iterations,
+        cfg.ln_rsqrt_initial_guess,
+    )
     traces[f"layer{layer}_attn_residual_post_ln_stats"] = matrix_stats(attn_residual)
     ffn_hidden_linear = matmul(attn_residual, w1, cfg)
     traces[f"layer{layer}_ffn_hidden_linear_stats"] = matrix_stats(ffn_hidden_linear)
@@ -477,7 +488,15 @@ def encoder_layer(
     traces[f"layer{layer}_ffn_out_stats"] = matrix_stats(ffn_out)
     ffn_residual_pre_ln = add(attn_residual, ffn_out, cfg)
     traces[f"layer{layer}_ffn_residual_pre_ln_stats"] = matrix_stats(ffn_residual_pre_ln)
-    out = layer_norm(ffn_residual_pre_ln, ffn_gamma, ffn_beta, cfg, 128.0, 24, 1.0 / 64.0)
+    out = layer_norm(
+        ffn_residual_pre_ln,
+        ffn_gamma,
+        ffn_beta,
+        cfg,
+        cfg.ln_centered_scale,
+        cfg.ln_rsqrt_iterations,
+        cfg.ln_rsqrt_initial_guess,
+    )
     traces[f"layer{layer}_ffn_residual_post_ln_stats"] = matrix_stats(out)
     traces[f"layer{layer}_out"] = out
     return out
@@ -523,12 +542,26 @@ def main() -> None:
     parser.add_argument("--layers", type=int, default=4)
     parser.add_argument("--ffn-hidden", type=int, default=16)
     parser.add_argument("--fractional", type=int, default=14)
+    parser.add_argument("--ln-centered-scale", type=float, default=256.0)
+    parser.add_argument("--ln-rsqrt-iterations", type=int, default=24)
+    parser.add_argument("--ln-rsqrt-initial-guess", type=float, default=1.0 / 128.0)
     parser.add_argument("--fixed", action="store_true", help="Emulate fixed-point truncation after MPC multiply steps.")
     parser.add_argument("--dump", action="store_true", help="Print intermediate matrices.")
     parser.add_argument("--trace", action="store_true", help="Print machine-readable PPTI_TRACE lines.")
     args = parser.parse_args()
 
-    cfg = Config(args.seq_len, args.hidden, args.heads, args.layers, args.ffn_hidden, args.fractional, args.fixed)
+    cfg = Config(
+        args.seq_len,
+        args.hidden,
+        args.heads,
+        args.layers,
+        args.ffn_hidden,
+        args.fractional,
+        args.fixed,
+        args.ln_centered_scale,
+        args.ln_rsqrt_iterations,
+        args.ln_rsqrt_initial_guess,
+    )
     if cfg.hidden % cfg.heads != 0:
         raise SystemExit("--hidden must be divisible by --heads.")
 
