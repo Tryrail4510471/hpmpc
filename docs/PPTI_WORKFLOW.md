@@ -476,3 +476,26 @@ Trace drift against the C++ `12/8` baseline:
 Recommendation: keep `12/8` as default and use `10/8` as the current explicit
 speed candidate. More aggressive settings such as `8/6` are faster but move the
 multi-layer output too far for the current TinyBERT accuracy target.
+
+## Stage 16 Seq32 Softmax Candidate Check
+
+The `10/8` Softmax candidate was rechecked at `seq=32` against the default
+`12/8` baseline:
+
+```text
+12/8 seq32 CPU ~= 10.78s, P0 send=33.18MB, P1/P2 send=26.86MB
+10/8 seq32 CPU ~= 10.79s, P0 send=31.61MB, P1/P2 send=25.29MB
+```
+
+Trace drift against the C++ `12/8` baseline:
+
+```text
+layer0_head0_probs max=0.00073 mean=0.0000895605
+final_output       max=0.02520 mean=0.00647177
+```
+
+Interpretation: `10/8` remains numerically stable at `seq=32` and reduces
+communication, but it does not improve wall-clock time on the current CPU path.
+The next optimization should therefore scan LayerNorm rsqrt iterations or move
+to a structural Softmax replacement instead of only reducing row-sum Newton
+rounds.

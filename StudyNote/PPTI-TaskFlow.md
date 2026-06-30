@@ -1341,3 +1341,44 @@ make -j PARTY=all FUNCTION_IDENTIFIER=87 PROTOCOL=5 DATTYPE=64 BITLENGTH=64 FRAC
   PPTI_SEQ_LEN=16 PPTI_HIDDEN=312 PPTI_NUM_HEADS=12 PPTI_NUM_LAYERS=4 PPTI_FFN_HIDDEN=1200 \
   PPTI_SOFTMAX_EXP_ITERATIONS=10 PPTI_SOFTMAX_ROWSUM_ITERATIONS=8
 ```
+
+## 阶段 16：Softmax 10/8 候选在 seq32 上复验
+
+目标：
+
+```text
+确认 Stage 15 的 10/8 Softmax 候选不是只在 seq16 上有效。
+在 seq32 上同时比较性能、通信量和相对 12/8 baseline 的 trace drift。
+```
+
+同环境 seq32 no-trace 对比：
+
+```text
+12/8 baseline:
+P0 send=33.18MB / 0.000008MB  getTime=10.782942s
+P1 send=0MB / 26.86MB         getTime=10.777614s
+P2 send=26.86MB / 0.000008MB  getTime=10.780986s
+
+10/8 candidate:
+P0 send=31.61MB / 0.000008MB  getTime=10.790858s
+P1 send=0MB / 25.29MB         getTime=10.787334s
+P2 send=25.29MB / 0.000008MB  getTime=10.789845s
+```
+
+seq32 上 `10/8` 相对 `12/8` C++ trace baseline 的漂移：
+
+```text
+layer0_head0_probs max=0.00073 mean=0.0000895605
+layer0_out         max=0.24860 mean=0.0271454397
+layer1_out         max=0.00790 mean=0.0028171985
+layer2_out         max=0.01490 mean=0.0054503796
+layer3_out         max=0.02520 mean=0.0064717668
+final_output       max=0.02520 mean=0.0064717668
+```
+
+阶段判断：
+
+- `10/8` 在 seq32 上没有明显降低 wall-clock time，当前 CPU 路径的瓶颈不完全在 Softmax reciprocal 轮数。
+- `10/8` 能稳定减少通信量：P0 从 `33.18MB` 降到 `31.61MB`，P1/P2 从 `26.86MB` 降到 `25.29MB`。
+- seq32 final drift mean 为 `0.00647`，比 seq16 的 `0.00905` 更小，说明该候选在 seq32 上没有放大误差。
+- 结论：`10/8` 可作为“省通信、轻微扰动”的实验候选；默认仍保持 `12/8`。下一步优化应该转向 LayerNorm rsqrt iteration 扫描或 Softmax 结构性替换，而不是继续盲目减少 row_sum 轮数。
