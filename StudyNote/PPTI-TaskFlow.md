@@ -1456,3 +1456,68 @@ final_output max=1.6084 mean=0.875118692
 - 20/16/12 虽然通信量略降，但数值误差不可接受，且 wall-clock time 不稳定，不具备默认优化价值。
 - 调整初值没有救回 20 轮，`1/64` 和 `1/256` 都比当前 `1/128` 更差。
 - 当前结论：`PPTI_LN_RSQRT_ITERATIONS=24` 继续作为稳定默认值。后续 LayerNorm 优化应改为结构性方案，例如分段/查表 rsqrt、公开尺度估计后的更好初值、或减少 LayerNorm 调用频率，而不是简单减少 Newton 轮数。
+
+## 阶段 18：LayerNorm rsqrt 初值边界扫描
+
+目标：
+
+```text
+验证 Stage 17 的失败是否只是初值太小导致的。
+在 20-iteration 下扫描更大的 public initial guess，寻找能否用更好初值替代 24-iteration baseline。
+```
+
+20-iteration 初值粗扫，相对 24-iteration baseline 的 final drift：
+
+```text
+init=1/128: final_output max=1.7332 mean=0.793736506
+init=1/64:  final_output max=0.9200 mean=0.401008482
+init=1/32:  final_output max=0.2715 mean=0.101596284
+init=1/16:  final_output max=0.6158 mean=0.201383944
+init=1/8:   final_output ~= 1e10 级，发散
+init=1/4:   final_output ~= 1e10 级，发散
+init=1/2:   final_output ~= 1e10 级，发散
+init=1:     final_output ~= 1e10 级，发散
+```
+
+20-iteration 初值细扫：
+
+```text
+init=1/96: final_output max=1.7416 mean=0.680815753
+init=1/80: final_output max=1.3100 mean=0.556016066
+init=1/64: final_output max=0.9200 mean=0.401008482
+init=1/48: final_output max=0.4609 mean=0.231605793
+init=1/40: final_output max=0.3744 mean=0.195382660
+init=1/36: final_output max=0.3760 mean=0.150754535
+init=1/32: final_output max=0.2715 mean=0.101596284
+init=1/28: final_output max=0.1304 mean=0.046488442
+init=1/24: final_output max=0.0727 mean=0.024753001
+init=1/23: final_output max=0.1334 mean=0.045036250
+init=1/22: final_output max=0.2000 mean=0.067033558
+init=1/21: final_output max=0.2690 mean=0.089748201
+init=1/20: final_output max=0.3396 mean=0.112657035
+init=1/18: final_output max=0.4836 mean=0.159056218
+```
+
+额外检查：
+
+```text
+21 iterations, init=1/24:
+final_output max=0.61791 mean=0.201740773
+seq16 CPU getTime ~= 6.60s
+
+22 iterations, init=1/24:
+final_output max=0.80910 mean=0.263890717
+seq16 CPU getTime ~= 7.84s
+
+20 iterations, init=1/24:
+final_output max=0.07270 mean=0.024753001
+seq16 CPU getTime ~= 8.00s
+```
+
+阶段判断：
+
+- 更大的 public initial guess 确实能显著改善 20-iteration rsqrt；最佳点约为 `init=1/24`。
+- 但最佳点仍有 `final_output mean drift ~= 0.0248`，比当前可接受的 Softmax `10/8` 候选漂移更大。
+- `init=1/24` 附近的收敛区间很窄，继续增加迭代到 21/22 反而变差，说明它靠近 Newton 收敛边界，不适合作为默认稳定配置。
+- wall-clock time 没有稳定收益：20-iteration + init=1/24 本次约 `8.00s`，不优于 24-iteration baseline 的常见 `~7.1s`。
+- 结论：默认仍保持 `24 iterations, init=1/128`。可记录 `20 iterations, init=1/24` 作为研究候选，但不进入默认路径。真正可落地的 LayerNorm 优化仍应做分段/查表 rsqrt 或先估计 variance range 再选择保守初值。

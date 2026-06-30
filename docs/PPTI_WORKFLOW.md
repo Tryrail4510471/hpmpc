@@ -534,3 +534,30 @@ Interpretation: the current fixed-point LayerNorm rsqrt requires the full
 optimization. Future LayerNorm work should use a structural approach such as a
 piecewise/lookup rsqrt, a stronger public-scale initial guess, or fewer
 LayerNorm invocations.
+
+## Stage 18 LayerNorm Initial Guess Boundary
+
+The 20-iteration LayerNorm rsqrt path was rescanned with larger public initial
+guesses. A better initial guess helps, but it does not produce a safe default:
+
+```text
+20 iterations, init=1/128 final_output mean=0.793736506
+20 iterations, init=1/64  final_output mean=0.401008482
+20 iterations, init=1/32  final_output mean=0.101596284
+20 iterations, init=1/28  final_output mean=0.046488442
+20 iterations, init=1/24  final_output mean=0.024753001
+20 iterations, init=1/23  final_output mean=0.045036250
+20 iterations, init>=1/8  diverges to ~1e10-scale outputs
+```
+
+Additional checks around the best point were non-monotonic:
+
+```text
+21 iterations, init=1/24 final_output mean=0.201740773
+22 iterations, init=1/24 final_output mean=0.263890717
+```
+
+Interpretation: `init=1/24` is a useful research boundary point, but it is too
+narrow and too inaccurate to replace the stable `24 iterations, init=1/128`
+baseline. It also did not deliver reliable wall-clock savings. Keep the stable
+default and treat LayerNorm acceleration as a future structural rsqrt problem.
